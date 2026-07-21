@@ -20,7 +20,7 @@ This repo contains every Unity script used, plus the YUV→RGB conversion shader
 - **[PopH264](https://github.com/SoylentGraham/PopH264)** for hardware H.264 decoding on Android/Quest (a wrapper around MediaCodec).
 - **Meta XR SDK / OVRPlugin** for passthrough and headset tracking.
 - **Unity Input System** for gamepad handling.
-- **Claude working with me
+- Claude working with me
 
 ## Architecture
 
