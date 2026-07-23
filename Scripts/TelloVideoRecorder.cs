@@ -28,9 +28,10 @@ namespace TelloQuest
     public class TelloVideoRecorder : MonoBehaviour
     {
         [SerializeField] private TelloVideoReceiver videoReceiver;
+#if !UNITY_ANDROID || UNITY_EDITOR
         [SerializeField] private string videoSaveFolderName = "TelloRecordings"; // Editor-only fallback folder name
-
         private FileStream fileStream; // Editor fallback only
+#endif
 #if UNITY_ANDROID && !UNITY_EDITOR
         private AndroidJavaObject androidOutputStream;
 #endif
@@ -110,7 +111,11 @@ namespace TelloQuest
             catch (Exception e)
             {
                 Debug.LogWarning($"[TelloVideoRecorder] Could not start recording: {e.Message}");
+#if UNITY_ANDROID && !UNITY_EDITOR
+                androidOutputStream = null;
+#else
                 fileStream = null;
+#endif
                 IsRecording = false;
             }
         }

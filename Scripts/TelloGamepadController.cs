@@ -73,7 +73,9 @@ namespace TelloQuest
         [Header("=== PHOTO CAPTURE (West / East) ===")]
         [Tooltip("Reference to the video display - it knows how to turn the current frame into a readable Texture2D regardless of decoder output format (direct RGBA or YUV NV12). If assigned, West/East save a PNG snapshot to disk.")]
         [SerializeField] private TelloVideoDisplay videoDisplay;
-        [SerializeField] private string photoSaveFolderName = "TelloPhotos";
+#if !UNITY_ANDROID || UNITY_EDITOR
+        [SerializeField] private string photoSaveFolderName = "TelloPhotos"; // Editor-only fallback folder name - Android saves via MediaStore instead, see CapturePhotoToDisk
+#endif
 
         [Header("=== VIDEO RECORDING (North) ===")]
         [Tooltip("Reference to the video recorder. If assigned, North button toggles recording the raw stream to disk.")]

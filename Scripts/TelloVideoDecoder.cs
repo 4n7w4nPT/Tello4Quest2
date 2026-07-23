@@ -86,34 +86,48 @@ namespace TelloQuest
 
         private bool sawFirstSps;
         private long diagnosticDiscardedBeforeSps;
+        private bool loggedStallWarning;
 
         private void HandleFrameReady(byte[] annexBFrame)
         {
             if (decoder == null) return;
 
             // PopH264 (like any H.264 decoder) can't produce anything from P/B-slices
-            // alone - it needs to have seen SPS AND PPS at least once first. If our
+            // alone - it needs to have seen an SPS/PPS at least once first. If our
             // socket started listening after the Tello's initial SPS/PPS/IDR burst
             // already went by, every access unit we get is just ongoing P-slices:
             // PushFrameData happily accepts them (returns true) but GetNextFrame()
             // will silently never produce a frame, forever. So: drop everything until
-            // we've actually seen BOTH a NAL type 7 (SPS) AND type 8 (PPS) in the same
-            // access unit, then start feeding from there. Requiring both (not just SPS
-            // alone) matters: a diagnostic session showed a case where an SPS-only
-            // access unit was found and accepted as the bootstrap point, yet the
-            // decoder still never produced a single frame afterward - almost certainly
-            // because that SPS wasn't paired with its PPS (a fragmentary/isolated NAL,
-            // not the real parameter-set burst), so the decoder still didn't have
-            // everything it needed despite the old, looser check being satisfied.
+            // we've actually seen a NAL type 7 (SPS), then start feeding from there.
+            //
+            // A stricter version of this check (requiring SPS AND PPS together in the
+            // same access unit) was tried and reverted - a live session showed
+            // discardedBeforeSps climbing without bound and pushed staying at zero for
+            // the entire session, meaning SPS/PPS aren't reliably paired within a
+            // single reassembled access unit on this stream, so the stricter check
+            // could stall forever. Plain "SPS alone" is looser but has proven reliable
+            // across many more sessions than it's failed on.
             if (!sawFirstSps)
             {
-                if (!ContainsNalType(annexBFrame, 7) || !ContainsNalType(annexBFrame, 8))
+                if (!ContainsNalType(annexBFrame, 7))
                 {
                     diagnosticDiscardedBeforeSps++;
+
+                    // Safety net: if this gate is still open after a very large number
+                    // of discards, something is wrong (either this check itself, or the
+                    // stream never actually contains an SPS) - log it loudly once so a
+                    // future regression here is obvious immediately instead of just
+                    // silently never decoding.
+                    if (!loggedStallWarning && diagnosticDiscardedBeforeSps > 500)
+                    {
+                        loggedStallWarning = true;
+                        Debug.LogWarning($"[TelloVideoDecoder] Still waiting for an SPS after {diagnosticDiscardedBeforeSps} discarded access units - video will not decode until one is found. This is not normal; worth investigating.");
+                    }
+
                     return;
                 }
                 sawFirstSps = true;
-                Debug.Log($"[TelloVideoDecoder][DIAG] First SPS+PPS pair seen after discarding {diagnosticDiscardedBeforeSps} pre-bootstrap access unit(s) - starting to feed the decoder now.");
+                Debug.Log($"[TelloVideoDecoder][DIAG] First SPS seen after discarding {diagnosticDiscardedBeforeSps} pre-SPS access unit(s) - starting to feed the decoder now.");
             }
 
             bool ok = decoder.PushFrameData(annexBFrame, nextFrameNumber++);

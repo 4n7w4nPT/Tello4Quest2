@@ -91,7 +91,9 @@ namespace TelloQuest
 
         [Header("=== FLIGHT LOG (CSV) ===")]
         [SerializeField] private bool enableFlightLog = false;
-        [SerializeField] private string flightLogFolderName = "TelloFlightLogs";
+#if !UNITY_ANDROID || UNITY_EDITOR
+        [SerializeField] private string flightLogFolderName = "TelloFlightLogs"; // Editor-only fallback folder name - Android saves via MediaStore instead, see OpenFlightLog
+#endif
 
         // ---------------------------------------------------------------
         // Network
@@ -720,7 +722,18 @@ namespace TelloQuest
         /// </summary>
         private void HandleCommandSideEffects(string cmd, string response, bool success)
         {
-            if (!success)
+            // Only an explicit "error" is a real signal the drone rejected the
+            // command - a timeout just means the acknowledgment packet was lost
+            // over UDP, which says nothing about whether the command itself was
+            // received and executed. Treating a timeout the same as "error" here
+            // used to flip IsFlying back to its previous state on every lost ack,
+            // which could cause Land()/Takeoff() to fire again and again in a
+            // loop (each call flips IsFlying optimistically, then a timeout on
+            // THAT command's own ack would immediately flip it right back).
+            // Leaving a timed-out command's guess alone and letting the
+            // height-based inference further down correct it if it's ever
+            // actually wrong is far more robust.
+            if (!success && response.Equals("error", StringComparison.OrdinalIgnoreCase))
             {
                 if (cmd == "takeoff") IsFlying = false; // takeoff refused, we're still on the ground
                 else if (cmd == "land") IsFlying = true; // land refused, we're still airborne
