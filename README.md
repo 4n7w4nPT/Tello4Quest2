@@ -4,18 +4,30 @@ Fly and watch the live video feed of a **DJI/Ryze Tello** drone (the consumer mo
 
 This repo contains every Unity script used, plus the YUV→RGB conversion shader and the two materials it depends on.
 
-**v0.2** — this release adds a full Menu/Piloting/Settings screen system, a scrollable settings screen with ~30 adjustable parameters, a drone "activity log" that narrates what's happening in short first-person lines, and a visual redesign (aviation-instrument look, custom fonts). See [Known limitations](#known-limitations--ideas-for-improvement) for what's still rough around the edges.
+**v0.3** — real `.mp4` recording (via Android's MediaMuxer, no more raw `.h264` needing ffmpeg to become watchable), a flight-path mini-map, and automatic video enhancement (night mode + sharpening). See [Known limitations](#known-limitations--ideas-for-improvement) for what's still rough around the edges.
+
+<details>
+<summary>v0.2 — Menu/Piloting/Settings screens, activity log, visual redesign</summary>
+
+This release added a full Menu/Piloting/Settings screen system, a scrollable settings screen with ~30 adjustable parameters, a drone "activity log" that narrates what's happening in short first-person lines, and a visual redesign (aviation-instrument look, custom fonts).
+</details>
+
+<details>
+<summary>v0.1 — first release</summary>
+
+Automatic connection to the Tello over WiFi direct, live H.264 video decoded and displayed on a world-locked floating screen, Bluetooth gamepad piloting (sticks, flips, takeoff/land, emergency stop), photo/video capture, live telemetry banners (battery, altitude, speed, flight time, video signal), and the first safety features: automatic landing on critical battery, a software altitude ceiling, crash detection, and a dead-reckoning estimate of the way back to the takeoff point. A pre-flight gate screen waited for gamepad + Tello WiFi + video feed before revealing the flight UI.
+</details>
 
 ## What it does
 
 - **Three-screen flow**: a Menu screen (pre-flight checklist + button legend), the Piloting screen (video + telemetry, gamepad live), and a Settings screen — see [Controls](#controls) below for the exact button mapping on each.
 - Automatic connection to the Tello over WiFi direct, no manual setup, with automatic reconnection if the link drops.
-- Live H.264 video decoded and displayed on a floating screen, world-locked (it does **not** follow your head). Distance, size, transparency, and vertical position are all adjustable in Settings.
+- Live H.264 video decoded and displayed on a floating screen, world-locked (it does **not** follow your head). Distance, size, transparency, and vertical position are all adjustable in Settings. Automatic image enhancement: a per-pixel night mode (brightness lift + adaptive noise blur on dark footage, self-limiting so well-lit footage is untouched) and sharpening to counter H.264 compression softness — no manual toggle, no whole-frame analysis pass, just local luma driving both effects.
 - Bluetooth gamepad piloting: sticks fly the drone, shoulder buttons/triggers adjust speed and stick sensitivity live, dpad triggers flips (one at a time — a new flip request is ignored, not queued, until the previous one is confirmed done), one button for takeoff/land, one for emergency stop (always live, regardless of which screen is showing).
 - Button prompts are brand-aware: PlayStation and Xbox controllers get the correct button name automatically (detected from the device's own name/manufacturer string), with a generic positional fallback ("press the bottom button") for anything unrecognized. Optional support for showing an actual button *icon* instead of text, via a Sony/Microsoft-style icon font (see [Fonts](#fonts)).
-- Photo capture (PNG) and raw video recording (.h264), saved to the headset's **shared** storage (`Pictures/Tello4Quest2`, `Movies/Tello4Quest2`) — visible via the headset's Files app, MQDH, or USB, the same way Quest's own screenshots are.
+- Photo capture (PNG) and video recording — real **.mp4** files (via Android's MediaMuxer, zero re-encoding of the underlying H.264 data), playable directly from the headset's own Files app/Quest gallery, no external tool needed. Both saved to the headset's **shared** storage (`Pictures/Tello4Quest2`, `Movies/Tello4Quest2`) — visible via the headset's Files app, MQDH, or USB, the same way Quest's own screenshots are.
 - Flight log (CSV) saved the same way, under `Download/Tello4Quest2`.
-- Live telemetry: top banner (gamepad/Tello/video/last-command status + temperature), bottom banner (altitude, flight time, ground speed, estimated time remaining, batteries), a left-side band (accelerometer gauge + bearing back to the takeoff point), and a right-side **activity log** — a running, first-person transcript of what the drone is doing and noticing ("Alright, taking off." / "Getting warm up here, keep an eye on me." / "Something's pushing me around — might be wind.").
+- Live telemetry: top banner (gamepad/Tello/video/last-command status + temperature), bottom banner (altitude, flight time, ground speed, estimated time remaining, batteries), a left-side band (accelerometer gauge + bearing back to the takeoff point), and a right-side band split in two: an **activity log** on top — a running, first-person transcript of what the drone is doing and noticing ("Alright, taking off." / "Getting warm up here, keep an eye on me." / "Something's pushing me around — might be wind."), oldest entry at the top fading toward the newest at the bottom — and a **mini-map** of the flight path below it: north-up (never rotates, only the drone's heading icon does), a persistent trail, and a zoom level based on the largest distance ever reached from the takeoff point this flight (never shrinks mid-flight, so the scale doesn't jitter).
 - Safety features: automatic landing on critical battery, a software altitude ceiling, crash detection (acceleration spike), dead-reckoning estimate of the way back to the takeoff point (no GPS on the consumer Tello), and a set of one-shot alerts (battery, temperature, abnormally fast descent, estimated wind drift, degrading signal) — each fires once per episode rather than spamming every telemetry tick, with hysteresis so a value sitting right at a threshold doesn't retrigger on every small wobble.
 - A Settings screen (reached from the Menu) with ~30 adjustable parameters — screen placement/size/opacity, flight safety thresholds, gamepad feel, panel placement — grouped by section, gamepad-navigable, with a one-press "reset to defaults" and everything persisted across app restarts.
 - A pre-flight gate screen that waits for gamepad + Tello WiFi + video feed to all be ready before allowing takeoff, with the three checks kept live in the background even while flying, so returning to the menu never shows stale status.
@@ -86,6 +98,7 @@ Video recordings are raw H.264 elementary streams (`.h264`), not `.mp4` — VLC 
 
 - **Tello protocol (consumer SDK 1.3)**: the official Ryze/DJI SDK documentation, plus a few undocumented behaviors confirmed through community reverse-engineering and our own testing — how video access units are framed by UDP packet size, the fact that the drone only emits its H.264 SPS/PPS/IDR parameter-set burst once (right when the encoder starts), and that a `flip` command isn't acknowledged until the maneuver has physically finished (~3s later), not on receipt.
 - **[PopH264](https://github.com/SoylentGraham/PopH264)** for hardware H.264 decoding on Android/Quest (a wrapper around MediaCodec).
+- **Android MediaMuxer API** for real-time `.mp4` muxing of the recorded stream — no re-encoding, same H.264 access units repackaged as they're written.
 - **Meta XR SDK / OVRPlugin** for passthrough and headset tracking.
 - **Unity Input System** for gamepad handling, including its Android-specific quirks around detecting a controller that pairs *after* the app has already launched (see [Known limitations](#known-limitations--ideas-for-improvement)).
 - **Android MediaStore API** for shared-storage photo/video/log saving.
@@ -97,16 +110,16 @@ Video recordings are raw H.264 elementary streams (`.h264`), not `.mp4` — VLC 
 |---|---|
 | `TelloConnection.cs` | Singleton managing the UDP connection (command port 8889, state port 8890), the sequential one-shot command queue, continuous `rc` sending, safety thresholds and one-shot alert logic, CSV flight logging (via MediaStore), and automatic reconnection. |
 | `TelloVideoReceiver.cs` | Raw UDP reception of the video stream (port 11111) and reassembly of H.264 (Annex-B) access units on a dedicated background thread. |
-| `TelloVideoDecoder.cs` | Hardware decoding via PopH264; handles both possible output formats (direct RGBA/BGRA, or 2-plane YUV NV12, depending on the device); waits for a paired SPS+PPS before feeding the decoder. |
+| `TelloVideoDecoder.cs` | Hardware decoding via PopH264; handles both possible output formats (direct RGBA/BGRA, or 2-plane YUV NV12, depending on the device); waits for a paired SPS+PPS before feeding the decoder, and captures the real SPS/PPS bytes live from the stream (never hardcoded) for `TelloVideoRecorder` to reuse. |
 | `TelloVideoDisplay.cs` | Displays the feed on a world-locked quad; handles zoom/continuous size, opacity, and photo capture. |
-| `TelloYuvNV12ToRGB.shader` + `TelloVideoYUV.mat` / `TelloVideoRGBA.mat` | GPU-side YUV→RGB conversion (BT.601) with alpha-blend support for the transparency setting, and the direct-RGBA material. |
-| `TelloVideoRecorder.cs` | Records the raw H.264 stream to shared storage with zero re-encoding. |
+| `TelloYuvNV12ToRGB.shader` + `TelloVideoYUV.mat` / `TelloVideoRGBA.mat` | GPU-side YUV→RGB conversion (BT.601) with alpha-blend support for the transparency setting, automatic night mode, and sharpening; and the direct-RGBA material. |
+| `TelloVideoRecorder.cs` | Records the video feed as a real `.mp4` via Android's MediaMuxer (zero re-encoding - the same H.264 access units are just repackaged as they're written), using the SPS/PPS `TelloVideoDecoder` captured live from the stream. |
 | `TelloGamepadController.cs` | Gamepad input (Unity Input System), command mapping, stick calibration, haptic feedback, photo capture trigger, flip lock. |
 | `TelloInitGate.cs` | Owns the Menu/Piloting/Settings screen state machine, the pre-flight checklist, the button legend (brand-aware prompts, optional icon glyphs), and hand-off to the flight display. |
 | `TelloSettingsScreen.cs` | The scrollable Settings screen — ~30 parameters across Display/Safety/Gamepad/Panels sections, gamepad navigation, reset-to-defaults, persistence. |
 | `TelloStatusPanel.cs` / `TelloOptionsPanel.cs` | Telemetry banners above/below the video screen. |
 | `TelloSpatialPanel.cs` | Left-side band: accelerometer gauge + bearing back to the takeoff point, combined in one panel sized to match the video screen's height. |
-| `TelloActionLogPanel.cs` | Right-side band: the drone's first-person activity log (actions taken, alerts raised). |
+| `TelloActionLogPanel.cs` | Right-side band: the drone's first-person activity log (top half) and a flight-path mini-map (bottom half). |
 | `TelloUiKit.cs` | Shared UI utilities — procedural rounded-sprite generation, card-shell building, fixed camera-relative placement math, and gamepad brand/button-prompt detection. |
 
 ## Building the project
@@ -166,6 +179,7 @@ Every cross-reference is wired by drag-and-drop in the Inspector — no `Shader.
 - `sdk?` returns `unknown command: sdk?` on some Tello firmware versions — cosmetic only, doesn't affect flight or video.
 - No disk-space management for recordings/photos.
 - Reconnection after a signal loss is automatic but can take a few seconds depending on how stable the Tello's WiFi is.
+- UDP packet reassembly occasionally produces an oversized access unit with multiple NAL units concatenated together, instead of a clean one-NAL-per-unit boundary (seen once in a diagnostic log, not yet root-caused). Doesn't currently break anything observed, but worth investigating further.
 - East and West both trigger a photo in Piloting mode right now (a leftover from consolidating an older "menu mode" toggle). Decoupling Takeoff (South) from Land (East) is planned — one button always does one thing regardless of the drone's current state, which removes a small but real safety risk in the current toggle (pressing South with a stale mental model of "is it flying" can do the opposite of what's intended). That change would also free West up for something non-redundant, along with letting players remap buttons themselves. Not yet implemented.
 - Feedback and PRs are very welcome, especially around gamepad detection reliability, wind-alert threshold tuning, and general ergonomics.
 
