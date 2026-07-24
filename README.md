@@ -92,7 +92,7 @@ To use them: download the `.ttf`, drop it in `Assets/Fonts/`, right-click → *C
 
 Photos, videos, and flight logs are all written via Android's **MediaStore** API into the shared collections (`Pictures/`, `Movies/`, `Download/`), each under a `Tello4Quest2` subfolder — not the app's private storage. This is deliberate: inserting your own new items into MediaStore doesn't require any special manifest permission on modern Android (scoped storage), and it means everything the app produces is immediately visible from the headset's own Files app, from MQDH's File Manager on a connected PC, and over a plain USB file transfer — the same way Quest's own screenshots and recordings are.
 
-Video recordings are raw H.264 elementary streams (`.h264`), not `.mp4` — VLC and ffplay open them directly; to get a standard container: `ffmpeg -i recording.h264 -c copy recording.mp4`.
+Video recordings are real `.mp4` files (Android's MediaMuxer muxes the H.264 data into a standard container in real time as it's written — no re-encoding, no separate step needed) — playable directly from the headset's own Files app/Quest gallery, VLC, or any standard video player, with no external tool required.
 
 ## Sources
 
