@@ -49,6 +49,8 @@ namespace TelloQuest
         [SerializeField, Range(0.5f, 10f)] private float sizeMultiplier = 1f;
         [Tooltip("0 = fully see-through, 1 = fully opaque. Requires rgbaMaterial/yuvMaterial's Surface Type set to Transparent in the Editor - alpha has no visible effect on an Opaque-surface material.")]
         [SerializeField, Range(0.15f, 1f)] private float opacity = 1f;
+        [Tooltip("Manual correction for a color cast coming from the Tello's own camera/sensor - negative = cooler/blue, positive = warmer/yellow. 0 = neutral, no change. Only affects the YUV material (the RGBA path uses Unity's built-in Unlit shader, which can't be edited the same way).")]
+        [SerializeField, Range(-1f, 1f)] private float whiteBalanceShift = 0f;
 
         [Header("=== TEST MODE ===")]
         [Tooltip("Show a generated checker pattern instead of the real feed - validate placement/material first.")]
@@ -74,6 +76,7 @@ namespace TelloQuest
         public float AssumedEyeHeightMeters { get => assumedEyeHeightMeters; set => assumedEyeHeightMeters = value; }
         public float SizeMultiplier => sizeMultiplier;
         public float Opacity => opacity;
+        public float WhiteBalanceShift => whiteBalanceShift;
 
         /// <summary>Raised whenever the zoom level changes - banners listen to this to stay glued to the resized screen.</summary>
         public event System.Action OnSizeChanged;
@@ -115,6 +118,22 @@ namespace TelloQuest
             }
         }
 
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV
+        /// material - see the field's tooltip.</summary>
+        public void SetWhiteBalanceShift(float value)
+        {
+            whiteBalanceShift = Mathf.Clamp(value, -1f, 1f);
+            ApplyWhiteBalanceShift();
+        }
+
+        private void ApplyWhiteBalanceShift()
+        {
+            if (yuvMaterial != null)
+            {
+                yuvMaterial.SetFloat("_WhiteBalanceShift", whiteBalanceShift);
+            }
+        }
+
         private void ApplyZoomScale()
         {
             if (quadTransform != null) quadTransform.localScale = new Vector3(QuadWidth, QuadHeight, 1f);
@@ -129,6 +148,7 @@ namespace TelloQuest
             assumedEyeHeightMeters = PlayerPrefs.GetFloat(PrefsPrefix + "EyeHeight", assumedEyeHeightMeters);
             sizeMultiplier = PlayerPrefs.GetFloat(PrefsPrefix + "SizeMultiplier", sizeMultiplier);
             opacity = PlayerPrefs.GetFloat(PrefsPrefix + "Opacity", opacity);
+            whiteBalanceShift = PlayerPrefs.GetFloat(PrefsPrefix + "WhiteBalanceShift", whiteBalanceShift);
             defaultZoomLevel = PlayerPrefs.GetInt(PrefsPrefix + "ZoomLevel", defaultZoomLevel);
         }
 
@@ -140,6 +160,7 @@ namespace TelloQuest
             PlayerPrefs.SetFloat(PrefsPrefix + "EyeHeight", assumedEyeHeightMeters);
             PlayerPrefs.SetFloat(PrefsPrefix + "SizeMultiplier", sizeMultiplier);
             PlayerPrefs.SetFloat(PrefsPrefix + "Opacity", opacity);
+            PlayerPrefs.SetFloat(PrefsPrefix + "WhiteBalanceShift", whiteBalanceShift);
             PlayerPrefs.SetInt(PrefsPrefix + "ZoomLevel", zoomLevel);
         }
 
@@ -152,6 +173,7 @@ namespace TelloQuest
             zoomLevel = Mathf.Clamp(defaultZoomLevel, 1, zoomMultipliers.Length);
             ApplyZoomScale();
             ApplyOpacity();
+            ApplyWhiteBalanceShift();
 
             if (rgbaMaterial == null || yuvMaterial == null)
                 Debug.LogError("[TelloVideoDisplay] rgbaMaterial or yuvMaterial not assigned in the inspector - create them as project assets first (see class doc comment).");

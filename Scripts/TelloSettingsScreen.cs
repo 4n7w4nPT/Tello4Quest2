@@ -526,6 +526,9 @@ namespace TelloQuest
             AddFloatRow("Transparency", 0.15f, 1f, 1f, "{0:P0}",
                 () => videoScreen != null ? videoScreen.Opacity : 1f,
                 v => videoScreen?.SetOpacity(v));
+            AddFloatRow("White balance", -1f, 1f, 0f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.WhiteBalanceShift : 0f,
+                v => videoScreen?.SetWhiteBalanceShift(v));
             AddFloatRow("Vertical offset", -1f, 1f, -0.3f, "{0:F2}m",
                 () => videoScreen != null ? videoScreen.VerticalOffset : -0.3f,
                 v => { if (videoScreen != null) videoScreen.VerticalOffset = v; });

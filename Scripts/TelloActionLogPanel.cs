@@ -9,13 +9,31 @@ namespace TelloQuest
     /// <summary>
     /// Band to the RIGHT of the video screen, mirroring TelloSpatialPanel's sizing
     /// convention (world height always equals the video screen's own height, same
-    /// gap as every other banner). Shows a simple scrolling transcript: player
-    /// actions (photo taken, recording started/stopped, speed/sensitivity changed,
-    /// takeoff/land) and system alerts (TelloConnection's existing warning
-    /// pipeline - battery, temperature, proximity, signal loss, crash suspected...).
+    /// gap as every other banner) and its top/bottom split layout.
     ///
-    /// Deliberately simple: one TextMeshPro block, newest line at the top, capped
-    /// to MaxEntries - no per-line interactive UI, this is a passive readout, not
+    /// Top half: the activity log - player actions (photo taken, recording
+    /// started/stopped, speed/sensitivity changed, takeoff/land) and system
+    /// alerts (TelloConnection's existing warning pipeline). Log entries read
+    /// top (oldest) to bottom (newest), the opposite of a typical chat log -
+    /// fading older entries out as they age keeps the newest, most relevant
+    /// line at the bottom clearly the most prominent one. Capped to MaxEntries.
+    ///
+    /// Bottom half: a mini-map of the flight path since the last takeoff,
+    /// built from TelloConnection's dead-reckoning trail (TelloConnection.
+    /// FlightTrail). North-up and fixed - the map itself never rotates, only
+    /// the drone icon does, deliberately: rotating an entire visual field is a
+    /// much stronger motion-sickness trigger in VR than a small icon spinning
+    /// in place. Zoom is based on the largest distance-from-home ever reached
+    /// this flight (never shrinks mid-flight, so the scale doesn't jitter as
+    /// the drone moves closer and farther from home) and eases toward its
+    /// target smoothly rather than snapping. The trail is drawn as small dots
+    /// connected by line segments (dots alone don't visually read as a path,
+    /// especially once there are more than a few) - both persistent (no
+    /// fade) - the point of the map is to honestly show the whole shape of the
+    /// flight, drift included, not to emphasize the recent past the way the
+    /// log above does.
+    ///
+    /// No per-line/per-map interactive UI - this is a passive readout, not
     /// something the pilot navigates with the stick.
     /// </summary>
     public class TelloActionLogPanel : MonoBehaviour
@@ -32,21 +50,50 @@ namespace TelloQuest
         [SerializeField] private float gap = 0.01f;
         [SerializeField] private bool positionedExternally = false;
 
-        [Tooltip("How many lines to keep - oldest entries drop off once this is exceeded.")]
-        [SerializeField] private int maxEntries = 16;
+        [Tooltip("How many lines to keep, oldest dropped first once exceeded - sized to comfortably fit the log's half of the band without needing to truncate a line.")]
+        [SerializeField] private int maxEntries = 12;
+        [Tooltip("Opacity of the oldest visible entry (top) - the newest (bottom) is always full opacity.")]
+        [SerializeField, Range(0f, 1f)] private float oldestEntryAlpha = 0.3f;
 
         private const float CanvasPixelWidth = 260f;
         private const float CanvasPixelHeight = 640f; // same internal-resolution convention as TelloSpatialPanel
 
         private static readonly Color PanelBackground = new Color(0.11f, 0.11f, 0.11f, 0.92f);
+        private static readonly Color InstrumentBackground = new Color(0.20f, 0.20f, 0.20f, 1f);
         private static readonly Color Ink = new Color(0.93f, 0.92f, 0.89f);
         private static readonly Color InkDim = new Color(0.54f, 0.56f, 0.58f);
         private static readonly Color Amber = new Color(0.91f, 0.64f, 0.24f);
+        private static readonly Color PanelEdge = new Color(0.15f, 0.17f, 0.19f, 1f);
 
         private Sprite roundedSprite;
         private CanvasGroup canvasGroup;
         private TextMeshProUGUI logText;
-        private readonly List<string> entries = new List<string>();
+
+        private struct LogEntry
+        {
+            public string timestamp;
+            public string message;
+            public Color color;
+        }
+
+        // Oldest at index 0, newest at the end - matches the top-to-bottom reading
+        // order on screen (see class comment for why newest-at-bottom was chosen).
+        private readonly List<LogEntry> entries = new List<LogEntry>();
+
+        [Header("=== MINI-MAP ===")]
+        [Tooltip("The display never zooms in tighter than this radius (cm), even right after takeoff when the flown distance is near zero.")]
+        [SerializeField] private float miniMapMinDisplayRadiusCm = 100f;
+        [Tooltip("How quickly the zoom eases toward its target scale - higher = faster.")]
+        [SerializeField] private float miniMapZoomSmoothing = 3f;
+
+        private Sprite circleSprite;
+        private Sprite arrowSprite;
+        private RectTransform miniMapContainer;
+        private RectTransform droneIconTransform;
+        private float miniMapRadiusPx;
+        private float miniMapPixelsPerCm = 1f; // current, smoothed toward the target each frame
+        private readonly List<Image> trailDotPool = new List<Image>(); // grows as the trail grows, never shrinks - excess dots just get hidden
+        private readonly List<Image> trailLinePool = new List<Image>(); // one fewer element than trailDotPool - a segment connects each consecutive pair
 
         private bool lastIsFlying;
         private bool hasLoggedInitialFlyingState;
@@ -55,6 +102,8 @@ namespace TelloQuest
         {
             if (tello == null) tello = TelloConnection.Instance;
             roundedSprite = TelloUiKit.GetRoundedSprite(cardCornerRadiusPx);
+            circleSprite = TelloUiKit.GetRoundedSprite(10000f); // deliberately huge - clamps to a circle inside GetRoundedSprite
+            arrowSprite = TelloUiKit.GetArrowSprite();
             BuildUI();
         }
 
@@ -186,16 +235,116 @@ namespace TelloQuest
                 // this only catches the rare case IsFlying changes without either
                 // command succeeding (e.g. auto-land triggered internally).
             }
+
+            UpdateMiniMap();
+        }
+
+        /// <summary>Eases the zoom toward its target scale (derived from
+        /// MaxDistanceFromHomeEverCm, which never shrinks mid-flight - see that
+        /// property's doc comment), then repositions every trail dot, connecting
+        /// line segment, and the drone icon to match. Both pools only ever grow -
+        /// once created, an element is reused (just hidden) rather than destroyed,
+        /// since the trail itself only ever grows too within a flight.
+        ///
+        /// The connecting lines are what actually make this read as a path rather
+        /// than a scatter of dots - a series of small, evenly-colored dots doesn't
+        /// visually stitch itself into a route the way an explicit line between
+        /// each pair of points does, especially once there are more than a
+        /// handful of them.</summary>
+        private void UpdateMiniMap()
+        {
+            if (miniMapContainer == null) return;
+
+            float radius = Mathf.Max(tello.MaxDistanceFromHomeEverCm, miniMapMinDisplayRadiusCm);
+            float targetPixelsPerCm = miniMapRadiusPx / radius;
+            miniMapPixelsPerCm = Mathf.Lerp(miniMapPixelsPerCm, targetPixelsPerCm, Time.deltaTime * miniMapZoomSmoothing);
+
+            IReadOnlyList<Vector2> trail = tello.FlightTrail;
+
+            // Line segments: one between each consecutive pair of points, so
+            // trail.Count points need trail.Count - 1 segments.
+            for (int i = 0; i < trail.Count - 1; i++)
+            {
+                if (i >= trailLinePool.Count)
+                {
+                    var lineGO = new GameObject($"TrailLine{i}", typeof(RectTransform), typeof(Image));
+                    lineGO.transform.SetParent(miniMapContainer, false);
+                    RectTransform lineRect = lineGO.GetComponent<RectTransform>();
+                    Image lineImage = lineGO.GetComponent<Image>(); // no sprite set - default flat white UI rect, exactly what a thin line needs
+                    lineImage.color = Color.white;
+                    trailLinePool.Add(lineImage);
+                }
+
+                Vector2 p0 = trail[i] * miniMapPixelsPerCm;
+                Vector2 p1 = trail[i + 1] * miniMapPixelsPerCm;
+                Vector2 mid = (p0 + p1) * 0.5f;
+                float length = Vector2.Distance(p0, p1);
+                float angle = Mathf.Atan2(p1.y - p0.y, p1.x - p0.x) * Mathf.Rad2Deg;
+
+                RectTransform segRect = trailLinePool[i].rectTransform;
+                segRect.sizeDelta = new Vector2(length, 2f);
+                segRect.anchoredPosition = mid;
+                segRect.localRotation = Quaternion.Euler(0f, 0f, angle);
+                trailLinePool[i].enabled = true;
+            }
+            for (int i = Mathf.Max(0, trail.Count - 1); i < trailLinePool.Count; i++) trailLinePool[i].enabled = false;
+
+            // Dots: small markers at each sampled point, secondary to the lines now.
+            for (int i = 0; i < trail.Count; i++)
+            {
+                if (i >= trailDotPool.Count)
+                {
+                    var dotGO = new GameObject($"TrailDot{i}", typeof(RectTransform), typeof(Image));
+                    dotGO.transform.SetParent(miniMapContainer, false);
+                    RectTransform dotRect = dotGO.GetComponent<RectTransform>();
+                    dotRect.sizeDelta = new Vector2(2.5f, 2.5f);
+                    Image dotImage = dotGO.GetComponent<Image>();
+                    dotImage.sprite = circleSprite;
+                    dotImage.color = Color.white; // persistent trail - always full opacity, unlike the log above (see class comment)
+                    trailDotPool.Add(dotImage);
+                }
+                trailDotPool[i].enabled = true;
+                trailDotPool[i].rectTransform.anchoredPosition = trail[i] * miniMapPixelsPerCm;
+                trailDotPool[i].transform.SetAsLastSibling(); // stay drawn on top of the connecting lines
+            }
+            for (int i = trail.Count; i < trailDotPool.Count; i++) trailDotPool[i].enabled = false;
+
+            droneIconTransform.anchoredPosition = tello.EstimatedPositionCm * miniMapPixelsPerCm;
+            droneIconTransform.localRotation = Quaternion.Euler(0f, 0f, -tello.Yaw);
+            droneIconTransform.SetAsLastSibling(); // stay drawn on top of everything else
         }
 
         private void AddEntry(string message, Color color)
         {
-            string timestamp = DateTime.Now.ToString("HH:mm:ss");
-            string hex = ColorUtility.ToHtmlStringRGB(color);
-            entries.Insert(0, $"<color=#{hex}>{timestamp}  {message}</color>");
-            while (entries.Count > maxEntries) entries.RemoveAt(entries.Count - 1);
+            entries.Add(new LogEntry
+            {
+                timestamp = DateTime.Now.ToString("HH:mm:ss"),
+                message = message,
+                color = color
+            });
+            while (entries.Count > maxEntries) entries.RemoveAt(0); // drop the oldest (top) first
 
-            if (logText != null) logText.text = string.Join("\n", entries);
+            RebuildLogText();
+        }
+
+        /// <summary>Redraws every visible line each time an entry is added - cheap at
+        /// this scale (max ~12 short lines), and simplest way to keep every line's
+        /// fade correct as its position (age rank) shifts with each new entry.</summary>
+        private void RebuildLogText()
+        {
+            if (logText == null) return;
+
+            var lines = new List<string>(entries.Count);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                float t = entries.Count > 1 ? i / (float)(entries.Count - 1) : 1f; // 0 = oldest/top, 1 = newest/bottom
+                float alpha = Mathf.Lerp(oldestEntryAlpha, 1f, t);
+                Color c = entries[i].color;
+                c.a = alpha;
+                string hex = ColorUtility.ToHtmlStringRGBA(c);
+                lines.Add($"<color=#{hex}>{entries[i].timestamp}  {entries[i].message}</color>");
+            }
+            logText.text = string.Join("\n", lines);
         }
 
         // =================================================================
@@ -216,29 +365,90 @@ namespace TelloQuest
 
             TelloUiKit.BuildFullRectBackground(canvasGO.transform, roundedSprite, PanelBackground);
 
-            var titleGO = new GameObject("Title", typeof(RectTransform));
-            titleGO.transform.SetParent(canvasGO.transform, false);
-            RectTransform titleRect = titleGO.GetComponent<RectTransform>();
-            titleRect.sizeDelta = new Vector2(CanvasPixelWidth - 20f, 24f);
-            titleRect.anchoredPosition = new Vector2(0f, 300f);
-            var title = titleGO.AddComponent<TextMeshProUGUI>();
-            title.fontSize = 14f;
-            title.color = Color.white;
-            title.alignment = TextAlignmentOptions.Center;
-            title.text = "Activity Log";
+            // ---- Top half: activity log ----
+            BuildLabel(canvasGO.transform, "Activity Log", 280f);
 
             var logGO = new GameObject("LogText", typeof(RectTransform));
             logGO.transform.SetParent(canvasGO.transform, false);
             RectTransform logRect = logGO.GetComponent<RectTransform>();
-            logRect.sizeDelta = new Vector2(CanvasPixelWidth - 24f, 580f);
-            logRect.anchoredPosition = new Vector2(0f, -10f);
+            logRect.sizeDelta = new Vector2(CanvasPixelWidth - 24f, 245f);
+            logRect.anchoredPosition = new Vector2(0f, 137f);
             logText = logGO.AddComponent<TextMeshProUGUI>();
             logText.fontSize = 11f;
             logText.color = InkDim;
-            logText.alignment = TextAlignmentOptions.TopLeft;
+            // Bottom-anchored on purpose: entries read oldest (top) to newest
+            // (bottom) - see class comment. If there's ever more text than fits,
+            // it should be the oldest line pushed off the TOP, never the newest
+            // clipped off the bottom - BottomLeft alignment does that naturally,
+            // where TopLeft would do the opposite.
+            logText.alignment = TextAlignmentOptions.BottomLeft;
             logText.textWrappingMode = TextWrappingModes.Normal;
-            logText.overflowMode = TextOverflowModes.Truncate; // oldest visible entries just clip rather than push the panel taller
+            logText.overflowMode = TextOverflowModes.Truncate;
             logText.text = "";
+
+            // ---- Divider ----
+            var dividerGO = new GameObject("Divider", typeof(RectTransform), typeof(Image));
+            dividerGO.transform.SetParent(canvasGO.transform, false);
+            RectTransform dividerRect = dividerGO.GetComponent<RectTransform>();
+            dividerRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 1f);
+            dividerRect.anchoredPosition = new Vector2(0f, 0f);
+            dividerGO.GetComponent<Image>().color = PanelEdge;
+
+            // ---- Bottom half: flight-path mini-map ----
+            BuildLabel(canvasGO.transform, "Mini-map", -40f);
+
+            var mapMaskGO = new GameObject("MiniMapMask", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
+            mapMaskGO.transform.SetParent(canvasGO.transform, false);
+            RectTransform mapMaskRect = mapMaskGO.GetComponent<RectTransform>();
+            mapMaskRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 250f);
+            mapMaskRect.anchoredPosition = new Vector2(0f, -195f);
+            mapMaskGO.GetComponent<Image>().color = InstrumentBackground;
+            // Small inward margin so a point at the very edge of the display
+            // radius doesn't render flush against - or clipped by - the mask.
+            miniMapRadiusPx = Mathf.Min(mapMaskRect.sizeDelta.x, mapMaskRect.sizeDelta.y) * 0.5f - 10f;
+
+            var mapContainerGO = new GameObject("MiniMapContainer", typeof(RectTransform));
+            mapContainerGO.transform.SetParent(mapMaskRect, false);
+            miniMapContainer = mapContainerGO.GetComponent<RectTransform>();
+            miniMapContainer.anchoredPosition = Vector2.zero;
+
+            // Home marker - fixed at the container's origin (drawn once; unlike the
+            // trail dots and drone icon, it never needs to move).
+            var homeGO = new GameObject("HomeMarker", typeof(RectTransform), typeof(Image));
+            homeGO.transform.SetParent(miniMapContainer, false);
+            RectTransform homeRect = homeGO.GetComponent<RectTransform>();
+            homeRect.sizeDelta = new Vector2(10f, 10f);
+            homeRect.anchoredPosition = Vector2.zero;
+            Image homeImage = homeGO.GetComponent<Image>();
+            homeImage.sprite = circleSprite;
+            homeImage.color = Amber;
+
+            // Drone heading icon - the dart/kite arrow from TelloUiKit, not the
+            // near-equilateral triangle glyph used elsewhere, since this one needs
+            // to clearly show a precise heading rather than just "a direction".
+            // Map itself never rotates (north-up, fixed) - only this icon spins
+            // with yaw - see class comment on why a rotating map was avoided in VR.
+            var droneIconGO = new GameObject("DroneIcon", typeof(RectTransform), typeof(Image));
+            droneIconGO.transform.SetParent(miniMapContainer, false);
+            droneIconTransform = droneIconGO.GetComponent<RectTransform>();
+            droneIconTransform.sizeDelta = new Vector2(16f, 22f);
+            Image droneIconImage = droneIconGO.GetComponent<Image>();
+            droneIconImage.sprite = arrowSprite;
+            droneIconImage.color = Ink;
+        }
+
+        private void BuildLabel(Transform parent, string text, float y)
+        {
+            var labelGO = new GameObject("Label", typeof(RectTransform));
+            labelGO.transform.SetParent(parent, false);
+            RectTransform labelRect = labelGO.GetComponent<RectTransform>();
+            labelRect.sizeDelta = new Vector2(CanvasPixelWidth - 20f, 24f);
+            labelRect.anchoredPosition = new Vector2(0f, y);
+            var label = labelGO.AddComponent<TextMeshProUGUI>();
+            label.fontSize = 14f;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.Center;
+            label.text = text;
         }
     }
 }

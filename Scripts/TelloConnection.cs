@@ -198,6 +198,20 @@ namespace TelloQuest
         private Vector2 estimatedPositionCm; // (x = east-ish, y = north-ish, in the drone's own start frame)
         private float lastReckoningTime;
 
+        // Flight-path trail for the mini-map - a distance-sampled history of
+        // estimatedPositionCm since the last takeoff (cleared at the same time
+        // estimatedPositionCm itself is, see Takeoff()). Sampled by distance
+        // moved rather than by time, so hovering in place doesn't pile up
+        // redundant points, and the trail shape reflects the actual path flown.
+        [Header("=== FLIGHT PATH TRAIL (for the mini-map) ===")]
+        [Tooltip("Minimum distance (cm) the estimated position must move before a new trail point is recorded.")]
+        [SerializeField] private float trailSampleDistanceCm = 18f;
+        [Tooltip("Safety cap on trail length - oldest points drop off if this is ever exceeded.")]
+        [SerializeField] private int maxTrailPoints = 500;
+
+        private readonly List<Vector2> flightTrail = new List<Vector2>();
+        private float maxDistanceFromHomeEverCm;
+
         // ---------------------------------------------------------------
         // Flight log
         // ---------------------------------------------------------------
@@ -327,6 +341,18 @@ namespace TelloQuest
         /// <summary>Rough estimated position (cm) relative to the takeoff point. Dead reckoning: drifts over time, indicative only.</summary>
         public Vector2 EstimatedPositionCm => estimatedPositionCm;
         public float DistanceFromHomeCm => estimatedPositionCm.magnitude;
+
+        /// <summary>Distance-sampled flight path since the last takeoff, in the same
+        /// start-frame coordinates as EstimatedPositionCm - oldest point first.</summary>
+        public IReadOnlyList<Vector2> FlightTrail => flightTrail;
+
+        /// <summary>The largest DistanceFromHomeCm has ever been since the last
+        /// takeoff - never decreases mid-flight, even if the drone flies back
+        /// closer to home afterward. Meant for a mini-map's zoom level: basing
+        /// zoom on this instead of the live distance means the displayed scale
+        /// only ever grows, never jitters in and out as the drone moves closer
+        /// and farther from home.</summary>
+        public float MaxDistanceFromHomeEverCm => maxDistanceFromHomeEverCm;
         /// <summary>Bearing (degrees, 0-360) to point back towards the takeoff point, in the drone's own start-heading frame.</summary>
         public float BearingToHomeDegrees => (Mathf.Atan2(-estimatedPositionCm.x, -estimatedPositionCm.y) * Mathf.Rad2Deg + 360f) % 360f;
 
@@ -755,6 +781,9 @@ namespace TelloQuest
             OnFlightCommandSent?.Invoke("takeoff");
             IsFlying = true;
             estimatedPositionCm = Vector2.zero;
+            flightTrail.Clear();
+            flightTrail.Add(Vector2.zero); // home itself is always the first point
+            maxDistanceFromHomeEverCm = 0f;
             lastReckoningTime = Time.time;
         }
 
@@ -959,6 +988,14 @@ namespace TelloQuest
             float worldVy = velocityX * Mathf.Sin(yawRad) + velocityY * Mathf.Cos(yawRad);
 
             estimatedPositionCm += new Vector2(worldVx, worldVy) * dt;
+
+            maxDistanceFromHomeEverCm = Mathf.Max(maxDistanceFromHomeEverCm, estimatedPositionCm.magnitude);
+
+            if (flightTrail.Count == 0 || Vector2.Distance(flightTrail[flightTrail.Count - 1], estimatedPositionCm) >= trailSampleDistanceCm)
+            {
+                flightTrail.Add(estimatedPositionCm);
+                if (flightTrail.Count > maxTrailPoints) flightTrail.RemoveAt(0);
+            }
         }
 
         // =================================================================

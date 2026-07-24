@@ -67,6 +67,71 @@ namespace TelloQuest
         }
 
         // =================================================================
+        // PROCEDURAL HEADING ARROW ("dart"/kite shape - a genuine pointer,
+        // not a near-equilateral triangle) - used by the mini-map's drone icon.
+        // =================================================================
+        private static Sprite arrowSpriteCache;
+
+        /// <summary>
+        /// Returns a cached 64x64 sprite of a dart/kite arrow pointing straight
+        /// up (toward the top edge of the sprite) - a sharp nose, wide
+        /// "wingspan" about a third of the way down, and a concave notch at the
+        /// back, the same silhouette used for GPS/compass heading indicators.
+        /// Deliberately not a triangle: a near-equilateral triangle doesn't read
+        /// clearly as "pointing precisely this way", which matters when the
+        /// whole point of the icon is to show a heading at a glance.
+        /// </summary>
+        public static Sprite GetArrowSprite()
+        {
+            if (arrowSpriteCache != null) return arrowSpriteCache;
+
+            const int size = 64;
+            Vector2[] poly =
+            {
+                new Vector2(0.5f, 1.0f),   // nose
+                new Vector2(0.85f, 0.35f), // right wing
+                new Vector2(0.5f, 0.5f),   // back notch (concave - this is what makes it a dart, not a triangle)
+                new Vector2(0.15f, 0.35f), // left wing
+            };
+
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var pixels = new Color32[size * size];
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    Vector2 p = new Vector2((x + 0.5f) / size, (y + 0.5f) / size);
+                    bool inside = IsInsidePolygon(p, poly);
+                    pixels[y * size + x] = inside ? new Color32(255, 255, 255, 255) : new Color32(255, 255, 255, 0);
+                }
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+
+            arrowSpriteCache = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+            return arrowSpriteCache;
+        }
+
+        /// <summary>Standard even-odd crossing-number point-in-polygon test - correct
+        /// for simple polygons regardless of convexity, so the concave notch above
+        /// works correctly (a convexity-assuming test would not handle that).</summary>
+        private static bool IsInsidePolygon(Vector2 p, Vector2[] poly)
+        {
+            bool inside = false;
+            int j = poly.Length - 1;
+            for (int i = 0; i < poly.Length; i++)
+            {
+                if (((poly[i].y > p.y) != (poly[j].y > p.y)) &&
+                    (p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x))
+                {
+                    inside = !inside;
+                }
+                j = i;
+            }
+            return inside;
+        }
+
+        // =================================================================
         // CARD SHELL (drop shadow + rounded background)
         // =================================================================
 

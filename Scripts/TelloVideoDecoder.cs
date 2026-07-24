@@ -38,6 +38,16 @@ namespace TelloQuest
         public long FramesPushFailedTotal { get; private set; }
         public float LastFrameDecodedTime { get; private set; }
 
+        /// <summary>The actual SPS/PPS NAL units (with their Annex-B start codes),
+        /// captured live from the real stream the first time each is seen - not
+        /// hardcoded. Other components (TelloVideoRecorder's MediaMuxer path) can
+        /// reuse these directly instead of re-scanning the stream themselves. Null
+        /// until found - PPS in particular isn't guaranteed to be in the exact same
+        /// access unit as the SPS (see the discussion in HandleFrameReady), so it's
+        /// searched for independently on every frame until captured once.</summary>
+        public byte[] CapturedSps { get; private set; }
+        public byte[] CapturedPps { get; private set; }
+
         /// <summary>Raised on the main thread whenever VideoTexture has fresh pixel data.</summary>
         public event Action OnTextureUpdated;
 
@@ -127,7 +137,21 @@ namespace TelloQuest
                     return;
                 }
                 sawFirstSps = true;
-                Debug.Log($"[TelloVideoDecoder][DIAG] First SPS seen after discarding {diagnosticDiscardedBeforeSps} pre-SPS access unit(s) - starting to feed the decoder now.");
+                CapturedSps = ExtractNal(annexBFrame, 7);
+                Debug.Log($"[TelloVideoDecoder][DIAG] First SPS seen after discarding {diagnosticDiscardedBeforeSps} pre-SPS access unit(s) - starting to feed the decoder now. Captured {CapturedSps?.Length ?? 0} SPS bytes.");
+            }
+
+            // PPS isn't guaranteed to land in the same access unit as the SPS (see
+            // the class comment above on why the stricter combined check was
+            // reverted) - keep looking independently on every frame until found once.
+            if (CapturedPps == null)
+            {
+                byte[] pps = ExtractNal(annexBFrame, 8);
+                if (pps != null)
+                {
+                    CapturedPps = pps;
+                    Debug.Log($"[TelloVideoDecoder][DIAG] PPS captured ({pps.Length} bytes).");
+                }
             }
 
             bool ok = decoder.PushFrameData(annexBFrame, nextFrameNumber++);
@@ -159,6 +183,39 @@ namespace TelloQuest
                 }
             }
             return false;
+        }
+
+        /// <summary>Returns the raw bytes of the first NAL of the given type found in
+        /// data - including its Annex-B start code (3 or 4 leading zero-bytes-then-1)
+        /// - or null if not found. Used to capture the real SPS/PPS bytes for reuse
+        /// elsewhere (see CapturedSps/CapturedPps) rather than hardcoding them.</summary>
+        private static byte[] ExtractNal(byte[] data, int nalType)
+        {
+            for (int i = 0; i < data.Length - 3; i++)
+            {
+                if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+                {
+                    int nalStart = i + 3;
+                    if (nalStart >= data.Length || (data[nalStart] & 0x1F) != nalType) continue;
+
+                    // Include the 4th leading zero of the start code if present.
+                    int codeStart = (i > 0 && data[i - 1] == 0) ? i - 1 : i;
+
+                    // Find where the NEXT start code begins - that's where this NAL ends.
+                    int nalEnd = data.Length;
+                    for (int j = nalStart; j < data.Length - 2; j++)
+                    {
+                        if (data[j] == 0 && data[j + 1] == 0 && data[j + 2] == 1) { nalEnd = j; break; }
+                    }
+                    // Trim a trailing zero byte that actually belongs to the next NAL's 4-byte start code.
+                    while (nalEnd > codeStart && data[nalEnd - 1] == 0) nalEnd--;
+
+                    byte[] result = new byte[nalEnd - codeStart];
+                    Array.Copy(data, codeStart, result, 0, result.Length);
+                    return result;
+                }
+            }
+            return null;
         }
 
         private void Update()
