@@ -1,0 +1,221 @@
+TELLO4QUEST2 — PROJECT STATE & BACKLOG (v0.4)
+=================================================
+Reference doc for bootstrapping a new conversation with the project assets.
+
+HARDWARE CONSTRAINTS TO KEEP IN MIND
+--------------------------------------
+- Tello (consumer, SDK 1.3): no GPS, no forward obstacle sensor, only a
+  downward ToF (altitude) + optical-flow sensor for its own internal position
+  estimate. Our own position tracking (dead reckoning) is built from the same
+  class of signal and drifts over time - not precise, not a substitute for
+  real positioning. Independently confirmed by another dev community's years
+  of struggling with this same sensor for autopilot work.
+- Quest 2: mobile SoC, no dedicated ML/GPU acceleration worth relying on in
+  real time. Anything requiring a live neural network is out of budget
+  UNLESS it's something the OS itself already provides for free (e.g.
+  Quest's native hand tracking).
+- No PC/companion computer in the loop, by design - standalone headset +
+  drone + gamepad is the whole point of the project.
+- Oculus Go: evaluated and rejected as a target. Meta/Unity dropped Go
+  support from the XR SDK toolchain in 2020 (SDK v19+) - would require
+  reverting to 5-6 year old tooling. Combined with no passthrough hardware
+  and 3DOF-only tracking (breaks the world-locked UI concept entirely), this
+  isn't a port, it would be a different, much smaller project. Not pursuing.
+
+
+=========================================
+PART 1 — IMPLEMENTED (v0.1 → v0.4)
+=========================================
+
+CONNECTIVITY & VIDEO PIPELINE
+- UDP connection to the Tello (command + state ports), sequential command
+  queue, automatic reconnection.
+- Live H.264 decode via PopH264 (hardware, MediaCodec-backed). Waits for a
+  live SPS before feeding the decoder. SPS/PPS are captured live from the
+  real stream and reused (not hardcoded) by the video recorder.
+- YUV NV12 → RGB conversion shader with:
+  - Automatic night mode (per-pixel brightness lift + adaptive blur on dark
+    footage) and sharpening (unsharp mask) - both strength-adjustable.
+  - Manual white balance, brightness, and contrast sliders - all neutral by
+    default, for correcting a lighting-specific color cast/exposure issue
+    the automatic effects don't (and shouldn't) touch.
+- Photo capture (PNG) and video recording (real .mp4 via Android's
+  MediaMuxer, zero re-encoding) - both saved to shared storage
+  (Pictures/Tello4Quest2, Movies/Tello4Quest2) via MediaStore.
+- Flight log (CSV) saved the same way, under Download/Tello4Quest2.
+
+SCREENS
+- Menu / Piloting / Settings state machine (TelloInitGate).
+- Menu screen: landscape layout, split left (5-item pre-flight checklist:
+  Bluetooth enabled, gamepad connected, Wi-Fi enabled, Tello Wi-Fi connected,
+  video feed connected) / right (X-cross button legend). Two of the five
+  checks read Android's Bluetooth/Wi-Fi state directly (needs
+  ACCESS_WIFI_STATE + ACCESS_NETWORK_STATE manifest permissions - see
+  README). All five checks stay live in the background even while flying.
+- X-cross legend: brand-aware prompts (PlayStation/Xbox detected from device
+  name, generic positional fallback otherwise), optional icon-glyph font.
+- Settings screen: ~35 parameters across Display/Safety/Gamepad/Panels
+  sections, scrollable, gamepad-navigable, reset-to-defaults, persisted.
+
+HUD / TELEMETRY
+- Top banner: gamepad/Tello/video/last-command status + temperature.
+- Bottom banner: altitude, flight time, ground speed, estimated remaining
+  flight time, Tello + headset battery.
+- Left band: four live time-series graphs (FPS, battery %, altitude,
+  temperature) in a 2x2 grid - fixed or Settings-driven Y axes, a time axis
+  that starts at a 2-minute window and smoothly widens (never scrolls) past
+  that, history persisting for the whole app session (not reset per-flight).
+  Replaced the earlier G-meter + home-direction-arrow instruments, which
+  turned out to rarely get looked at once the mini-map existed.
+- Right band: mini-map (top 75%) + activity log (bottom 25%). Mini-map is
+  north-up (only the drone's heading icon rotates, not the map itself -
+  avoids a VR motion-sickness trigger), trail drawn as connected line
+  segments (not scattered dots) for readability, zoom based on the largest
+  distance ever reached this flight (never shrinks mid-flight). Activity log
+  is first-person drone-voice narration, oldest-to-newest top-to-bottom,
+  fading with age.
+- Both side bands: same width, height matched to the video screen, angled
+  ~20° toward the pilot (mirrored angles) like a cockpit side console.
+
+SAFETY
+- Auto-land on critical battery, software altitude ceiling, crash detection
+  (acceleration spike).
+- One-shot alerts (not repeated every telemetry tick) with hysteresis:
+  battery low/critical, temperature (fast rise or near-critical), abnormal
+  fast descent, estimated wind drift, degrading signal (before full loss).
+- Fixed a real bug where a command TIMEOUT (lost UDP ack) was treated the
+  same as an explicit drone-side "error", causing IsFlying to flip back and
+  forth and repeatedly resend Land/Takeoff in a loop. Now only a genuine
+  "error" response triggers that reversal.
+
+GAMEPAD
+- Full flight mapping: sticks, takeoff/land toggle, photo, record toggle,
+  flips (locked to one at a time, not queued), speed/sensitivity, emergency
+  stop (always live).
+- Brand detection with a fallback that scans InputSystem's device list
+  directly (Gamepad.current alone misses a controller that paired but
+  hasn't sent input yet - still doesn't fully solve the deeper "paired after
+  launch" bug, see backlog).
+
+KNOWN OPEN ISSUES (bugs, not backlog features)
+- Gamepad sometimes never detected if paired AFTER the app has already
+  launched - confirmed at the OS/Bluetooth level pairing succeeds, but
+  Unity's Input System device list can stay empty regardless, across
+  multiple independent test sessions. Workaround: turn the gamepad on
+  before launching. Root cause not found; likely needs a native
+  Android-side bridge.
+- In-headset gallery: abandoned, no known working approach on Quest's OS.
+- Wi-Fi auto-connect (Menu screen's West button): built
+  (TelloWifiConnector.java + WifiNetworkSpecifier), but disabled after
+  proving unreliable in testing. Code stays in the project; the button is
+  currently a no-op.
+- East and West both trigger a photo in Piloting mode (unrelated to the
+  Menu screen's West button above) - redundant, leftover from an earlier
+  control scheme.
+- UDP packet reassembly occasionally produces an oversized access unit with
+  multiple NALs concatenated instead of clean one-per-unit boundaries (seen
+  once in a diagnostic log). Not investigated.
+- Tracking Origin / Guardian requirement: if the project's rig uses Floor
+  Level tracking + Passthrough, Quest's OS requires a configured Roomscale
+  Guardian boundary to even LAUNCH the app - fails silently (returns to
+  launcher, no error) if the headset doesn't have one. Fixed for this
+  project by switching to Device/Eye Level tracking (documented in the
+  README's Building section) - noted here as a real gotcha for anyone
+  setting the project up fresh, not an unfixed bug in the current build.
+
+
+=========================================
+PART 2 — BACKLOG (not yet implemented)
+=========================================
+Complexity: S = small/contained, M = real feature work, L = substantial,
+needs its own design pass before coding.
+
+CONTROLS
+- [S] Decouple Takeoff (South) / Land (East) in Piloting mode - removes the
+  West/East photo redundancy and a small toggle-based safety risk (pressing
+  South with a stale belief about flight state can currently do the
+  opposite of what's intended).
+- [M] Custom button remapping in Settings.
+- [S] Flight profiles - saved presets of speed/sensitivity/safety settings.
+- [M] Head-orientation input - use the Quest's own head tracking for a
+  LIMITED assist (e.g. a small yaw nudge from looking left/right, or gated
+  behind a held button), NOT full "head is a second stick" - our video
+  screen is deliberately world-locked specifically to avoid this class of
+  VR discomfort, needs a real design pass before coding.
+- [M/L] Hand-gesture input via Quest's native hand tracking (not the
+  drone's camera - a camera-based approach doesn't fit FPV piloting, where
+  the pilot isn't standing in view of the drone). No ML work needed from us
+  (Quest's OS does the tracking), but real UX design work needed to define
+  a gesture vocabulary that doesn't conflict with normal use.
+
+SAFETY / NAVIGATION
+- [L] Return-to-home (RTH) - HIGH RISK given Tello position drift. Do not
+  start this without first watching the mini-map behave across several
+  real flights - if the drawn trail drifts unpredictably, RTH is not safe
+  to build on top of it yet. The mini-map (shipped in v0.3) exists
+  specifically to make this drift visible before committing to RTH.
+- [M] Visual geofencing - define a boundary, alert/soft-stop near the edge.
+  Same position-drift caveat as RTH, lower stakes (a warning, not automated
+  flight).
+- [M] Two-step takeoff confirmation - small deliberate friction before
+  spinning props, reduces accidental takeoff.
+
+SCREENS / UX
+- [S] Flight history - list of past flights (duration, distance, max
+  altitude) parsed from the CSV logs already being saved.
+- [M] Persistent settings extras - unit system (metric/imperial), light/dark
+  banner theme, language/localization.
+- [M/L] Multi-window layout - scope still vague, needs definition.
+- [S] Simple artificial horizon line - pitch/roll are in telemetry and
+  currently unused visually; a HUD overlay is a contained addition.
+
+VIDEO QUALITY
+- [S] Digital zoom - real crop+magnify of the camera texture (distinct from
+  the existing screen-size Settings slider, which resizes the physical
+  screen in the room, not the image content).
+- [L] FSR 1.0 (AMD FidelityFX spatial upscaler) - confirmed technically
+  viable (pure shader, single-frame, MIT-licensed source), but a real
+  algorithmic implementation (EASU + RCAS passes), meaningfully harder to
+  get right than the sharpening pass already shipped. Only worth it if
+  sharpening turns out insufficient once tested for real.
+- [M] Horizon stabilization - counter-rotate the video image using existing
+  pitch/roll telemetry so the horizon stays level regardless of drone tilt.
+  Flagged as high-value for VR specifically (tilting horizon = motion
+  sickness trigger), not yet built.
+
+INVESTIGATION (not a feature - a bug hunt)
+- [M] UDP packet-reassembly oversized-access-unit issue (see Known Open
+  Issues above).
+- [S/M] Gamepad-paired-after-launch detection - three sessions of log
+  evidence gathered, root cause still not found. Likely needs a native
+  Android-side bridge (an InputManager.InputDeviceListener, similar in
+  spirit to TelloWifiConnector.java's approach for the Wi-Fi callback) -
+  worth a dedicated session rather than another quick C#-only attempt.
+
+
+REFERENCE MATERIAL (not action items - context only)
+--------------------------------------------------------
+- github.com/dji-sdk/Tello-Python - official Ryze/DJI sample repo, most
+  authoritative source on the Tello video protocol if another SPS/PPS-class
+  mystery ever comes up. Nothing directly portable (Python 2.7, desktop).
+- github.com/cstath/tello-ros2-ai, github.com/VanniMaceria/ARDronesSwarm -
+  ROS2/ESP8266-based autonomous-agent and swarm projects. Different class of
+  product (PC/gateway-tethered autonomous control vs. our standalone manual
+  VR piloting). Not applicable.
+- github.com/dbaldwin/DroneBlocks-Tello-Camera-With-Python-OpenCV - browser/
+  Flask/OpenCV education project. Checked specifically for video-pipeline
+  ideas, found none applicable.
+- github.com/Monks103/TelloNO - phone-based (not VR) Tello controller.
+  Source of the MediaMuxer idea (shipped in v0.3) and the SPS/PPS-hardcoding
+  investigation (which led us to live-capture-and-reuse instead, see
+  Implemented above).
+- github.com/kinivi/tello-gesture-control - MediaPipe hand-gesture control
+  via the drone's own camera. Doesn't transfer directly (see Hand-gesture
+  input in the backlog above for the reframed version that does fit us).
+- github.com/ShvdeLub/Tello-head-control - DIY Arduino+IMU head control via
+  Cardboard VR. Inspired the Head-orientation input backlog item above,
+  using the Quest's native tracking instead of external hardware.
+- tellopilots.com "Unity Controller for Tello 3.0" - PID-based autopilot +
+  3D position tracking project, abandoned by its author specifically because
+  of Tello position-tracking unreliability. Independent confirmation of the
+  RTH risk noted above, not code to reuse.
