@@ -529,6 +529,18 @@ namespace TelloQuest
             AddFloatRow("White balance", -1f, 1f, 0f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.WhiteBalanceShift : 0f,
                 v => videoScreen?.SetWhiteBalanceShift(v));
+            AddFloatRow("Brightness", -1f, 1f, 0f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.Brightness : 0f,
+                v => videoScreen?.SetBrightness(v));
+            AddFloatRow("Contrast", 0.5f, 2f, 1f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.Contrast : 1f,
+                v => videoScreen?.SetContrast(v));
+            AddFloatRow("Night mode strength", 0f, 1f, 0.35f, "{0:P0}",
+                () => videoScreen != null ? videoScreen.NightModeStrength : 0.35f,
+                v => videoScreen?.SetNightModeStrength(v));
+            AddFloatRow("Sharpening strength", 0f, 1.5f, 0.4f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.SharpenStrength : 0.4f,
+                v => videoScreen?.SetSharpenStrength(v));
             AddFloatRow("Vertical offset", -1f, 1f, -0.3f, "{0:F2}m",
                 () => videoScreen != null ? videoScreen.VerticalOffset : -0.3f,
                 v => { if (videoScreen != null) videoScreen.VerticalOffset = v; });
@@ -607,9 +619,6 @@ namespace TelloQuest
             if (gamepadController != null) saveActions.Add(gamepadController.SavePersistedSettings);
 
             AddSection("Panels");
-            AddFloatRow("Accel gauge sensitivity", 100f, 1000f, 400f, "{0:F0}",
-                () => spatialPanel != null ? spatialPanel.MaxDisplayAcceleration : 400f,
-                v => { if (spatialPanel != null) spatialPanel.MaxDisplayAcceleration = v; });
             AddFloatRow("Side panels gap", 0f, 0.1f, 0.01f, "{0:F2}m",
                 () => spatialPanel != null ? spatialPanel.Gap : 0.01f,
                 v => { if (spatialPanel != null) spatialPanel.Gap = v; });

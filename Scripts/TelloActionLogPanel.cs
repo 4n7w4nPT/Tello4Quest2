@@ -7,31 +7,33 @@ using UnityEngine.UI;
 namespace TelloQuest
 {
     /// <summary>
-    /// Band to the RIGHT of the video screen, mirroring TelloSpatialPanel's sizing
-    /// convention (world height always equals the video screen's own height, same
-    /// gap as every other banner) and its top/bottom split layout.
+    /// Band to the RIGHT of the video screen - same width, same sizing
+    /// convention (world height pinned to the video screen's own height), and
+    /// the same cockpit angle as TelloSpatialPanel on the left, mirrored (see
+    /// PositionRightOfScreen).
     ///
-    /// Top half: the activity log - player actions (photo taken, recording
-    /// started/stopped, speed/sensitivity changed, takeoff/land) and system
-    /// alerts (TelloConnection's existing warning pipeline). Log entries read
-    /// top (oldest) to bottom (newest), the opposite of a typical chat log -
-    /// fading older entries out as they age keeps the newest, most relevant
-    /// line at the bottom clearly the most prominent one. Capped to MaxEntries.
+    /// Top (75% of height): a mini-map of the flight path since the last
+    /// takeoff, built from TelloConnection's dead-reckoning trail
+    /// (TelloConnection.FlightTrail). North-up and fixed - the map itself
+    /// never rotates, only the drone icon does, deliberately: rotating an
+    /// entire visual field is a much stronger motion-sickness trigger in VR
+    /// than a small icon spinning in place. Zoom is based on the largest
+    /// distance-from-home ever reached this flight (never shrinks mid-flight,
+    /// so the scale doesn't jitter as the drone moves closer and farther from
+    /// home) and eases toward its target smoothly rather than snapping. The
+    /// trail is drawn as small dots connected by line segments (dots alone
+    /// don't visually read as a path) - both persistent (no fade), since the
+    /// point of the map is to honestly show the whole shape of the flight,
+    /// drift included. Scaling stays uniform in X and Y even though the plot
+    /// area is now a wide rectangle rather than square - a non-uniform scale
+    /// would distort the true shape of the path, which defeats the point.
     ///
-    /// Bottom half: a mini-map of the flight path since the last takeoff,
-    /// built from TelloConnection's dead-reckoning trail (TelloConnection.
-    /// FlightTrail). North-up and fixed - the map itself never rotates, only
-    /// the drone icon does, deliberately: rotating an entire visual field is a
-    /// much stronger motion-sickness trigger in VR than a small icon spinning
-    /// in place. Zoom is based on the largest distance-from-home ever reached
-    /// this flight (never shrinks mid-flight, so the scale doesn't jitter as
-    /// the drone moves closer and farther from home) and eases toward its
-    /// target smoothly rather than snapping. The trail is drawn as small dots
-    /// connected by line segments (dots alone don't visually read as a path,
-    /// especially once there are more than a few) - both persistent (no
-    /// fade) - the point of the map is to honestly show the whole shape of the
-    /// flight, drift included, not to emphasize the recent past the way the
-    /// log above does.
+    /// Bottom (25% of height): the activity log - player actions (photo
+    /// taken, recording started/stopped, speed/sensitivity changed, takeoff/
+    /// land) and system alerts. Entries read top (oldest) to bottom (newest),
+    /// fading older ones out so the newest stays the most prominent line.
+    /// Capped to MaxEntries, sized to fit this now-smaller quarter of the
+    /// band without needing to truncate a line.
     ///
     /// No per-line/per-map interactive UI - this is a passive readout, not
     /// something the pilot navigates with the stick.
@@ -48,14 +50,16 @@ namespace TelloQuest
         [SerializeField] private float cardCornerRadiusPx = 14f;
         [Tooltip("Horizontal gap between this panel and the video screen, in world units - same convention as every other banner's gap.")]
         [SerializeField] private float gap = 0.01f;
+        [Tooltip("Rotation around the vertical axis, mirroring TelloSpatialPanel's cockpit angle on the left - same magnitude, opposite sign, so both panels angle toward the pilot symmetrically.")]
+        [SerializeField] private float cockpitAngleDegrees = 20f;
         [SerializeField] private bool positionedExternally = false;
 
-        [Tooltip("How many lines to keep, oldest dropped first once exceeded - sized to comfortably fit the log's half of the band without needing to truncate a line.")]
-        [SerializeField] private int maxEntries = 12;
+        [Tooltip("How many lines to keep, oldest dropped first once exceeded - sized to comfortably fit the log's quarter of the band (25% of height) without needing to truncate a line.")]
+        [SerializeField] private int maxEntries = 8;
         [Tooltip("Opacity of the oldest visible entry (top) - the newest (bottom) is always full opacity.")]
         [SerializeField, Range(0f, 1f)] private float oldestEntryAlpha = 0.3f;
 
-        private const float CanvasPixelWidth = 260f;
+        private const float CanvasPixelWidth = 560f; // matches TelloSpatialPanel
         private const float CanvasPixelHeight = 640f; // same internal-resolution convention as TelloSpatialPanel
 
         private static readonly Color PanelBackground = new Color(0.11f, 0.11f, 0.11f, 0.92f);
@@ -167,7 +171,10 @@ namespace TelloQuest
         }
 
         /// <summary>Same formula pattern as TelloSpatialPanel - world height pinned to
-        /// the screen's QuadHeight, positioned to the RIGHT with the standard gap.</summary>
+        /// the screen's QuadHeight, positioned to the RIGHT with the standard gap,
+        /// then angled toward the pilot - the mirror image of the left panel's
+        /// angle (same magnitude, opposite sign, since this panel needs to turn the
+        /// opposite way to still face the pilot from the other side).</summary>
         private void PositionRightOfScreen()
         {
             if (videoScreen == null)
@@ -184,7 +191,7 @@ namespace TelloQuest
             float bandWorldWidth = CanvasPixelWidth * scale;
             float x = videoScreen.QuadWidth * 0.5f + gap + bandWorldWidth * 0.5f;
             transform.localPosition = new Vector3(x, 0f, 0f);
-            transform.localRotation = Quaternion.identity;
+            transform.localRotation = Quaternion.Euler(0f, cockpitAngleDegrees, 0f);
         }
 
         // =================================================================
@@ -328,7 +335,7 @@ namespace TelloQuest
         }
 
         /// <summary>Redraws every visible line each time an entry is added - cheap at
-        /// this scale (max ~12 short lines), and simplest way to keep every line's
+        /// this scale (max ~8 short lines), and simplest way to keep every line's
         /// fade correct as its position (age rank) shifts with each new entry.</summary>
         private void RebuildLogText()
         {
@@ -365,46 +372,21 @@ namespace TelloQuest
 
             TelloUiKit.BuildFullRectBackground(canvasGO.transform, roundedSprite, PanelBackground);
 
-            // ---- Top half: activity log ----
-            BuildLabel(canvasGO.transform, "Activity Log", 280f);
-
-            var logGO = new GameObject("LogText", typeof(RectTransform));
-            logGO.transform.SetParent(canvasGO.transform, false);
-            RectTransform logRect = logGO.GetComponent<RectTransform>();
-            logRect.sizeDelta = new Vector2(CanvasPixelWidth - 24f, 245f);
-            logRect.anchoredPosition = new Vector2(0f, 137f);
-            logText = logGO.AddComponent<TextMeshProUGUI>();
-            logText.fontSize = 11f;
-            logText.color = InkDim;
-            // Bottom-anchored on purpose: entries read oldest (top) to newest
-            // (bottom) - see class comment. If there's ever more text than fits,
-            // it should be the oldest line pushed off the TOP, never the newest
-            // clipped off the bottom - BottomLeft alignment does that naturally,
-            // where TopLeft would do the opposite.
-            logText.alignment = TextAlignmentOptions.BottomLeft;
-            logText.textWrappingMode = TextWrappingModes.Normal;
-            logText.overflowMode = TextOverflowModes.Truncate;
-            logText.text = "";
-
-            // ---- Divider ----
-            var dividerGO = new GameObject("Divider", typeof(RectTransform), typeof(Image));
-            dividerGO.transform.SetParent(canvasGO.transform, false);
-            RectTransform dividerRect = dividerGO.GetComponent<RectTransform>();
-            dividerRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 1f);
-            dividerRect.anchoredPosition = new Vector2(0f, 0f);
-            dividerGO.GetComponent<Image>().color = PanelEdge;
-
-            // ---- Bottom half: flight-path mini-map ----
-            BuildLabel(canvasGO.transform, "Mini-map", -40f);
+            // ---- Top (75% of height): flight-path mini-map ----
+            BuildLabel(canvasGO.transform, "Mini-map", 295f);
 
             var mapMaskGO = new GameObject("MiniMapMask", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
             mapMaskGO.transform.SetParent(canvasGO.transform, false);
             RectTransform mapMaskRect = mapMaskGO.GetComponent<RectTransform>();
-            mapMaskRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 250f);
-            mapMaskRect.anchoredPosition = new Vector2(0f, -195f);
+            mapMaskRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 420f);
+            mapMaskRect.anchoredPosition = new Vector2(0f, 60f);
             mapMaskGO.GetComponent<Image>().color = InstrumentBackground;
-            // Small inward margin so a point at the very edge of the display
-            // radius doesn't render flush against - or clipped by - the mask.
+            // Deliberately uniform (X and Y share the same pixels-per-cm scale)
+            // even though this area is a wide rectangle now, not square - a
+            // non-uniform scale would stretch the true shape of the flight path.
+            // Using the SMALLER dimension as the constraint (Min, not the
+            // rectangle's own aspect ratio) means some horizontal margin goes
+            // unused on a wide area like this - intentional, not a bug.
             miniMapRadiusPx = Mathf.Min(mapMaskRect.sizeDelta.x, mapMaskRect.sizeDelta.y) * 0.5f - 10f;
 
             var mapContainerGO = new GameObject("MiniMapContainer", typeof(RectTransform));
@@ -435,6 +417,35 @@ namespace TelloQuest
             Image droneIconImage = droneIconGO.GetComponent<Image>();
             droneIconImage.sprite = arrowSprite;
             droneIconImage.color = Ink;
+
+            // ---- Divider, at the 75/25 boundary ----
+            var dividerGO = new GameObject("Divider", typeof(RectTransform), typeof(Image));
+            dividerGO.transform.SetParent(canvasGO.transform, false);
+            RectTransform dividerRect = dividerGO.GetComponent<RectTransform>();
+            dividerRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 1f);
+            dividerRect.anchoredPosition = new Vector2(0f, -160f);
+            dividerGO.GetComponent<Image>().color = PanelEdge;
+
+            // ---- Bottom (25% of height): activity log ----
+            BuildLabel(canvasGO.transform, "Activity Log", -185f);
+
+            var logGO = new GameObject("LogText", typeof(RectTransform));
+            logGO.transform.SetParent(canvasGO.transform, false);
+            RectTransform logRect = logGO.GetComponent<RectTransform>();
+            logRect.sizeDelta = new Vector2(CanvasPixelWidth - 24f, 110f);
+            logRect.anchoredPosition = new Vector2(0f, -255f);
+            logText = logGO.AddComponent<TextMeshProUGUI>();
+            logText.fontSize = 11f;
+            logText.color = InkDim;
+            // Bottom-anchored on purpose: entries read oldest (top) to newest
+            // (bottom) - see class comment. If there's ever more text than fits,
+            // it should be the oldest line pushed off the TOP, never the newest
+            // clipped off the bottom - BottomLeft alignment does that naturally,
+            // where TopLeft would do the opposite.
+            logText.alignment = TextAlignmentOptions.BottomLeft;
+            logText.textWrappingMode = TextWrappingModes.Normal;
+            logText.overflowMode = TextOverflowModes.Truncate;
+            logText.text = "";
         }
 
         private void BuildLabel(Transform parent, string text, float y)

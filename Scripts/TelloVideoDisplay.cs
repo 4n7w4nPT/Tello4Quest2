@@ -51,6 +51,14 @@ namespace TelloQuest
         [SerializeField, Range(0.15f, 1f)] private float opacity = 1f;
         [Tooltip("Manual correction for a color cast coming from the Tello's own camera/sensor - negative = cooler/blue, positive = warmer/yellow. 0 = neutral, no change. Only affects the YUV material (the RGBA path uses Unity's built-in Unlit shader, which can't be edited the same way).")]
         [SerializeField, Range(-1f, 1f)] private float whiteBalanceShift = 0f;
+        [Tooltip("Manual overall brightness - negative = darker, positive = brighter. 0 = neutral. Applied after white balance, before contrast. YUV material only.")]
+        [SerializeField, Range(-1f, 1f)] private float brightness = 0f;
+        [Tooltip("Manual contrast, scaled around the midpoint. 1 = neutral. YUV material only.")]
+        [SerializeField, Range(0.5f, 2f)] private float contrast = 1f;
+        [Tooltip("How strongly automatic night mode brightens dark footage - turn this down if it's over-brightening in your conditions rather than fighting it with negative Brightness above. 0 disables the effect entirely. YUV material only.")]
+        [SerializeField, Range(0f, 1f)] private float nightModeStrength = 0.35f;
+        [Tooltip("How strongly the automatic sharpening pass counters H.264 softness. 0 disables it entirely. YUV material only.")]
+        [SerializeField, Range(0f, 1.5f)] private float sharpenStrength = 0.4f;
 
         [Header("=== TEST MODE ===")]
         [Tooltip("Show a generated checker pattern instead of the real feed - validate placement/material first.")]
@@ -77,6 +85,10 @@ namespace TelloQuest
         public float SizeMultiplier => sizeMultiplier;
         public float Opacity => opacity;
         public float WhiteBalanceShift => whiteBalanceShift;
+        public float Brightness => brightness;
+        public float Contrast => contrast;
+        public float NightModeStrength => nightModeStrength;
+        public float SharpenStrength => sharpenStrength;
 
         /// <summary>Raised whenever the zoom level changes - banners listen to this to stay glued to the resized screen.</summary>
         public event System.Action OnSizeChanged;
@@ -134,6 +146,34 @@ namespace TelloQuest
             }
         }
 
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetBrightness(float value)
+        {
+            brightness = Mathf.Clamp(value, -1f, 1f);
+            if (yuvMaterial != null) yuvMaterial.SetFloat("_Brightness", brightness);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetContrast(float value)
+        {
+            contrast = Mathf.Clamp(value, 0.5f, 2f);
+            if (yuvMaterial != null) yuvMaterial.SetFloat("_Contrast", contrast);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetNightModeStrength(float value)
+        {
+            nightModeStrength = Mathf.Clamp01(value);
+            if (yuvMaterial != null) yuvMaterial.SetFloat("_NightModeStrength", nightModeStrength);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetSharpenStrength(float value)
+        {
+            sharpenStrength = Mathf.Clamp(value, 0f, 1.5f);
+            if (yuvMaterial != null) yuvMaterial.SetFloat("_SharpenStrength", sharpenStrength);
+        }
+
         private void ApplyZoomScale()
         {
             if (quadTransform != null) quadTransform.localScale = new Vector3(QuadWidth, QuadHeight, 1f);
@@ -149,6 +189,10 @@ namespace TelloQuest
             sizeMultiplier = PlayerPrefs.GetFloat(PrefsPrefix + "SizeMultiplier", sizeMultiplier);
             opacity = PlayerPrefs.GetFloat(PrefsPrefix + "Opacity", opacity);
             whiteBalanceShift = PlayerPrefs.GetFloat(PrefsPrefix + "WhiteBalanceShift", whiteBalanceShift);
+            brightness = PlayerPrefs.GetFloat(PrefsPrefix + "Brightness", brightness);
+            contrast = PlayerPrefs.GetFloat(PrefsPrefix + "Contrast", contrast);
+            nightModeStrength = PlayerPrefs.GetFloat(PrefsPrefix + "NightModeStrength", nightModeStrength);
+            sharpenStrength = PlayerPrefs.GetFloat(PrefsPrefix + "SharpenStrength", sharpenStrength);
             defaultZoomLevel = PlayerPrefs.GetInt(PrefsPrefix + "ZoomLevel", defaultZoomLevel);
         }
 
@@ -161,6 +205,10 @@ namespace TelloQuest
             PlayerPrefs.SetFloat(PrefsPrefix + "SizeMultiplier", sizeMultiplier);
             PlayerPrefs.SetFloat(PrefsPrefix + "Opacity", opacity);
             PlayerPrefs.SetFloat(PrefsPrefix + "WhiteBalanceShift", whiteBalanceShift);
+            PlayerPrefs.SetFloat(PrefsPrefix + "Brightness", brightness);
+            PlayerPrefs.SetFloat(PrefsPrefix + "Contrast", contrast);
+            PlayerPrefs.SetFloat(PrefsPrefix + "NightModeStrength", nightModeStrength);
+            PlayerPrefs.SetFloat(PrefsPrefix + "SharpenStrength", sharpenStrength);
             PlayerPrefs.SetInt(PrefsPrefix + "ZoomLevel", zoomLevel);
         }
 
@@ -174,6 +222,13 @@ namespace TelloQuest
             ApplyZoomScale();
             ApplyOpacity();
             ApplyWhiteBalanceShift();
+            if (yuvMaterial != null)
+            {
+                yuvMaterial.SetFloat("_Brightness", brightness);
+                yuvMaterial.SetFloat("_Contrast", contrast);
+                yuvMaterial.SetFloat("_NightModeStrength", nightModeStrength);
+                yuvMaterial.SetFloat("_SharpenStrength", sharpenStrength);
+            }
 
             if (rgbaMaterial == null || yuvMaterial == null)
                 Debug.LogError("[TelloVideoDisplay] rgbaMaterial or yuvMaterial not assigned in the inspector - create them as project assets first (see class doc comment).");

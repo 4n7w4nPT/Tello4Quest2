@@ -36,8 +36,18 @@ namespace TelloQuest
         [Tooltip("Where the SPS/PPS codec-config bytes come from - must be the same TelloVideoDecoder actually decoding this stream.")]
         [SerializeField] private TelloVideoDecoder videoDecoder;
         [Tooltip("Must match the Tello's actual encoder resolution - confirmed via decoded SPS analysis (Profile Main, Level 4.0). Only affects the file's declared dimensions, not decoding correctness, so a mismatch here would show as a stretched video rather than a broken one.")]
+        // CS0414 disabled for these two: they ARE used, but only inside the
+        // Android-only MediaMuxer branch below (#if UNITY_ANDROID && !UNITY_EDITOR).
+        // The Editor's own compile pass always has UNITY_EDITOR defined - regardless
+        // of which platform is set active - so from its point of view these two
+        // fields are never read, hence the (false-positive) warning. Guarding the
+        // field declarations themselves with the same #if would silence it, but
+        // would also hide them from the Inspector entirely (Inspector always runs
+        // in-Editor), which is worse than a suppressed warning.
+#pragma warning disable 0414
         [SerializeField] private int videoWidthPx = 960;
         [SerializeField] private int videoHeightPx = 720;
+#pragma warning restore 0414
 
 #if !UNITY_ANDROID || UNITY_EDITOR
         [SerializeField] private string videoSaveFolderName = "TelloRecordings"; // Editor-only fallback folder name

@@ -12,11 +12,19 @@ namespace TelloQuest
     /// Settings (adjust screen distance/size/opacity). Full screen swaps, not a
     /// navigable menu - there is no cursor, no selection, nothing to browse.
     ///
+    /// Menu screen is landscape, split down the middle: LEFT half is the
+    /// five-item pre-flight checklist + status readout, RIGHT half is the
+    /// X-cross button legend. Wider than earlier portrait-ish versions,
+    /// specifically so both halves are readable together without needing to
+    /// scan up and down.
+    ///
     ///   Menu screen:
-    ///     South - enter piloting mode, only once all three checks are green.
-    ///     West  - best-effort attempt to open a system image viewer (see
-    ///             OpenSystemGallery - no fully reliable "open the real Quest
-    ///             gallery" API exists, so this degrades gracefully).
+    ///     South - enter piloting mode, only once all five checks are green.
+    ///     West  - request a connection to a Tello's Wi-Fi hotspot (SSID
+    ///             starting with "TELLO-") - see ConnectToTelloWifi. Replaces
+    ///             an earlier "open gallery" attempt that never worked (no
+    ///             reliable way to open a real gallery viewer from a
+    ///             third-party Quest app was ever found).
     ///     East  - quit the app. Only reachable from this screen, which means
     ///             the drone is always grounded when this fires.
     ///     North - open the Settings screen (see TelloSettingsScreen).
@@ -30,17 +38,23 @@ namespace TelloQuest
     ///   it and takes screen control back via ExitSettings().
     ///
     /// The Tello connection is never torn down when swapping screens - only
-    /// quitting the app (from the menu) closes it. The three checks keep
+    /// quitting the app (from the menu) closes it. All five checks keep
     /// evaluating every frame regardless of which screen is showing, so the
     /// menu screen always reflects live status the instant it's shown again.
     ///
     /// World-locked, same as the flight display: positioned once in Start(),
     /// never moves after that.
     ///
-    /// Setup: TelloVideoScreen, TelloStatusPanel/TelloOptionsPanel/accel/home
-    /// panels, and TelloSettingsScreen should all start INACTIVE in the scene,
-    /// each with their own "Positioned Externally" checkbox turned ON. This
-    /// script activates and reveals them as needed - see TelloVideoDisplay.
+    /// Setup: TelloVideoScreen, TelloStatusPanel/TelloOptionsPanel/spatial/
+    /// action-log panels, and TelloSettingsScreen should all start INACTIVE in
+    /// the scene, each with their own "Positioned Externally" checkbox turned
+    /// ON. This script activates and reveals them as needed - see
+    /// TelloVideoDisplay.
+    ///
+    /// The Wi-Fi auto-connect (West button) requires a small compiled Java
+    /// helper (TelloWifiConnector.java) alongside this script - see
+    /// ConnectToTelloWifi's doc comment for exactly where it goes and why a
+    /// plain C#/AndroidJavaProxy approach doesn't work for this specific API.
     /// </summary>
     public class TelloInitGate : MonoBehaviour
     {
@@ -71,10 +85,25 @@ namespace TelloQuest
         [SerializeField] private float distanceFromCamera = 1.2f;
         [SerializeField] private float assumedEyeHeightMeters = 1.6f;
         [SerializeField] private float verticalOffset = -0.3f;
-        [SerializeField] private float worldWidth = 0.9f;
+        [SerializeField] private float worldWidth = 2.1f; // 1.4 * 1.5 - enlarged per feedback that the landscape layout felt small
 
         [Header("=== CARD SHAPE (matches the flight display banners) ===")]
         [SerializeField] private float cornerRadiusPx = 20f;
+
+        [Header("=== WI-FI AUTO-CONNECT (West button) ===")]
+        [Tooltip("SSID prefix to match - the Tello's own hotspot names always start with this.")]
+        // CS0414 disabled: only used inside the Android-only branch of
+        // ConnectToTelloWifi() (#if UNITY_ANDROID && !UNITY_EDITOR) - the
+        // Editor's own compile pass always has UNITY_EDITOR defined regardless
+        // of active platform, so from its point of view this field is never
+        // read, hence the false-positive warning. Guarding the field
+        // declaration itself with the same #if would silence it, but would
+        // also hide it from the Inspector entirely (Inspector always runs
+        // in-Editor) - worse than a suppressed warning, since the SSID prefix
+        // needs to stay configurable.
+#pragma warning disable 0414
+        [SerializeField] private string telloSsidPrefix = "TELLO-";
+#pragma warning restore 0414
 
         [Header("=== FONTS (optional - falls back to TMP default if unassigned) ===")]
         [Tooltip("Stencil/display face for the title - e.g. Big Shoulders Stencil, imported as a TMP Font Asset.")]
@@ -97,8 +126,12 @@ namespace TelloQuest
         [SerializeField] private string iconGlyphXboxEast = "c";  // B
         [SerializeField] private string iconGlyphXboxWest = "a";  // X
 
-        private const float CanvasPixelWidth = 700f;
-        private const float CanvasPixelHeight = 840f;
+        // Landscape now: wider than tall, split down the middle. Was a single
+        // 700x840 portrait-ish column before.
+        private const float CanvasPixelWidth = 1240f;
+        private const float CanvasPixelHeight = 620f;
+        private const float LeftCenterX = -310f;  // center of the left (checklist) half
+        private const float RightCenterX = 310f;  // center of the right (X-cross) half
         private const float CrossSize = 400f; // SQUARE cross zone - a wide/flat rectangle mathematically squishes the top/bottom wedges and over-sizes the left/right ones; a square gives four genuinely equal wedges
 
         // Aviation-instrument palette - a warm amber accent (cockpit warning-light
@@ -139,15 +172,24 @@ namespace TelloQuest
             public float anim; // 0 = off, 1 = on - eased toward target each frame
         }
 
+        private SwitchRow bluetoothSwitch;
         private SwitchRow gamepadSwitch;
+        private SwitchRow wifiSwitch;
         private SwitchRow telloSwitch;
         private SwitchRow videoSwitch;
 
         private AppState state = AppState.Menu;
-        private bool gamepadOk, telloOk, videoOk;
+        private bool bluetoothOk, gamepadOk, wifiOk, telloOk, videoOk;
+
+        // Bluetooth/Wi-Fi-enabled are read via Android system calls, which cost
+        // real JNI overhead - throttled to a few times a second rather than
+        // every frame like the other (cheap, plain-C#) checks. A half-second
+        // lag in reflecting a toggle change is completely fine here.
+        private float nativeCheckTimer;
+        private const float NativeCheckInterval = 0.5f;
 
         private TextMeshProUGUI flyPrompt;
-        private TextMeshProUGUI galleryPrompt;
+        private TextMeshProUGUI wifiConnectPrompt;
         private TextMeshProUGUI quitPrompt;
         private TextMeshProUGUI settingsPrompt;
 
@@ -162,7 +204,7 @@ namespace TelloQuest
 
         public AppState State => state;
         public bool IsPiloting => state == AppState.Piloting;
-        public bool AllChecksOk => gamepadOk && telloOk && videoOk;
+        public bool AllChecksOk => bluetoothOk && gamepadOk && wifiOk && telloOk && videoOk;
 
         private void Awake()
         {
@@ -200,7 +242,7 @@ namespace TelloQuest
             SetPrompt(flyPrompt, brand, "south");
             SetPrompt(settingsPrompt, brand, "north");
             SetPrompt(quitPrompt, brand, "east");
-            SetPrompt(galleryPrompt, brand, "west");
+            SetPrompt(wifiConnectPrompt, brand, "west");
         }
 
         public TMP_FontAsset IconFont => iconFont;
@@ -279,79 +321,101 @@ namespace TelloQuest
             canvasGO.transform.localScale = Vector3.one * (worldWidth / CanvasPixelWidth);
             canvasGroup = canvasGO.AddComponent<CanvasGroup>();
 
-            // Single background for the ENTIRE canvas, including behind the cross -
-            // a separate, differently-colored fill for the legend strip previously
-            // created a visible two-tone seam. One consistent fill, full stop.
+            // Single background for the ENTIRE canvas - a separate fill per half
+            // would create a visible seam, same lesson learned from the old
+            // legend-strip background before the X-cross redesign.
             TelloUiKit.BuildFullRectBackground(canvasGO.transform, roundedSprite, PanelBg);
 
-            // Cursor-based top-down layout - avoids the fragile "add a shift
-            // constant to every hardcoded Y value" approach that made the previous
-            // couple of passes error-prone to reason about.
+            // Vertical divider between the two halves.
+            var centerDividerGO = new GameObject("CenterDivider", typeof(RectTransform), typeof(Image));
+            centerDividerGO.transform.SetParent(canvasGO.transform, false);
+            RectTransform centerDividerRect = centerDividerGO.GetComponent<RectTransform>();
+            centerDividerRect.sizeDelta = new Vector2(1f, CanvasPixelHeight - 30f);
+            centerDividerRect.anchoredPosition = Vector2.zero;
+            centerDividerGO.GetComponent<Image>().color = PanelEdge;
+
+            BuildLeftChecklist(canvasGO.transform);
+            BuildRightLegend(canvasGO.transform);
+        }
+
+        /// <summary>LEFT half: nameplate header, five checklist rows, status readout.
+        /// Cursor-based top-down layout within this half only.</summary>
+        private void BuildLeftChecklist(Transform parent)
+        {
             float cursorY = CanvasPixelHeight / 2f - 25f;
 
-            // ---- Nameplate header: small amber mark + stencil title, mono subtitle ----
             var markGO = new GameObject("Mark", typeof(RectTransform), typeof(Image));
-            markGO.transform.SetParent(canvasGO.transform, false);
+            markGO.transform.SetParent(parent, false);
             RectTransform markRect = markGO.GetComponent<RectTransform>();
             markRect.sizeDelta = new Vector2(10f, 10f);
-            markRect.anchoredPosition = new Vector2(-330f, cursorY);
+            markRect.anchoredPosition = new Vector2(LeftCenterX - 260f, cursorY);
             Image markImage = markGO.GetComponent<Image>();
             markImage.sprite = circleSprite;
             markImage.type = Image.Type.Simple;
             markImage.color = Amber;
 
             var titleGO = new GameObject("Title", typeof(RectTransform));
-            titleGO.transform.SetParent(canvasGO.transform, false);
+            titleGO.transform.SetParent(parent, false);
             RectTransform titleRect = titleGO.GetComponent<RectTransform>();
-            titleRect.sizeDelta = new Vector2(300f, 40f);
-            titleRect.anchoredPosition = new Vector2(-155f, cursorY);
+            titleRect.sizeDelta = new Vector2(260f, 40f);
+            titleRect.anchoredPosition = new Vector2(LeftCenterX - 95f, cursorY);
             var title = titleGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(title, displayFont);
             title.text = "TELLO4QUEST2";
-            title.fontSize = 26f;
+            title.fontSize = 24f;
             title.color = Ink;
             title.alignment = TextAlignmentOptions.MidlineLeft;
 
-            // Subtitle: right-aligned box sized/positioned to stay fully inside the canvas.
             var subtitleGO = new GameObject("Subtitle", typeof(RectTransform));
-            subtitleGO.transform.SetParent(canvasGO.transform, false);
+            subtitleGO.transform.SetParent(parent, false);
             RectTransform subtitleRect = subtitleGO.GetComponent<RectTransform>();
-            subtitleRect.sizeDelta = new Vector2(180f, 30f);
-            subtitleRect.anchoredPosition = new Vector2(235f, cursorY);
+            subtitleRect.sizeDelta = new Vector2(170f, 30f);
+            subtitleRect.anchoredPosition = new Vector2(LeftCenterX + 175f, cursorY);
             var subtitle = subtitleGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(subtitle, monoFont);
             subtitle.text = "PRE FLIGHT CHECK";
-            subtitle.fontSize = 12f;
+            subtitle.fontSize = 11f;
             subtitle.color = InkDim;
             subtitle.alignment = TextAlignmentOptions.MidlineRight;
             subtitle.textWrappingMode = TextWrappingModes.NoWrap;
             subtitle.overflowMode = TextOverflowModes.Ellipsis;
 
             cursorY -= 50f;
-            BuildDivider(canvasGO.transform, cursorY, CanvasPixelWidth - 40f);
-            cursorY -= 40f;
+            BuildDivider(parent, cursorY, 580f, LeftCenterX);
+            cursorY -= 30f;
 
-            // ---- Checklist rows (toggle switches) ----
-            gamepadSwitch = BuildSwitchRow(canvasGO.transform, "STEP 1", "Gamepad connected", cursorY);
-            cursorY -= 56f;
-            BuildDivider(canvasGO.transform, cursorY, CanvasPixelWidth - 40f);
-            cursorY -= 14f;
+            const float rowHeight = 56f;
+            const float rowGap = 20f;
 
-            telloSwitch = BuildSwitchRow(canvasGO.transform, "STEP 2", "Tello Wi-Fi connected", cursorY);
-            cursorY -= 56f;
-            BuildDivider(canvasGO.transform, cursorY, CanvasPixelWidth - 40f);
-            cursorY -= 14f;
+            bluetoothSwitch = BuildSwitchRow(parent, "STEP 1", "Bluetooth enabled", cursorY, LeftCenterX, 580f);
+            cursorY -= rowHeight;
+            BuildDivider(parent, cursorY, 580f, LeftCenterX);
+            cursorY -= rowGap;
 
-            videoSwitch = BuildSwitchRow(canvasGO.transform, "STEP 3", "Video feed connected", cursorY);
-            cursorY -= 56f;
-            cursorY -= 26f;
+            gamepadSwitch = BuildSwitchRow(parent, "STEP 2", "Gamepad connected", cursorY, LeftCenterX, 580f);
+            cursorY -= rowHeight;
+            BuildDivider(parent, cursorY, 580f, LeftCenterX);
+            cursorY -= rowGap;
 
-            // ---- Status bar ----
+            wifiSwitch = BuildSwitchRow(parent, "STEP 3", "Wi-Fi enabled", cursorY, LeftCenterX, 580f);
+            cursorY -= rowHeight;
+            BuildDivider(parent, cursorY, 580f, LeftCenterX);
+            cursorY -= rowGap;
+
+            telloSwitch = BuildSwitchRow(parent, "STEP 4", "Tello Wi-Fi connected", cursorY, LeftCenterX, 580f);
+            cursorY -= rowHeight;
+            BuildDivider(parent, cursorY, 580f, LeftCenterX);
+            cursorY -= rowGap;
+
+            videoSwitch = BuildSwitchRow(parent, "STEP 5", "Video feed connected", cursorY, LeftCenterX, 580f);
+            cursorY -= rowHeight;
+            cursorY -= 20f;
+
             var statusBgGO = new GameObject("StatusBar", typeof(RectTransform), typeof(Image));
-            statusBgGO.transform.SetParent(canvasGO.transform, false);
+            statusBgGO.transform.SetParent(parent, false);
             RectTransform statusBgRect = statusBgGO.GetComponent<RectTransform>();
-            statusBgRect.sizeDelta = new Vector2(600f, 46f);
-            statusBgRect.anchoredPosition = new Vector2(0f, cursorY);
+            statusBgRect.sizeDelta = new Vector2(560f, 46f);
+            statusBgRect.anchoredPosition = new Vector2(LeftCenterX, cursorY);
             statusBg = statusBgGO.GetComponent<Image>();
             statusBg.sprite = roundedSprite;
             statusBg.type = Image.Type.Sliced;
@@ -360,7 +424,7 @@ namespace TelloQuest
             var statusGO = new GameObject("StatusText", typeof(RectTransform));
             statusGO.transform.SetParent(statusBgRect, false);
             RectTransform statusRect = statusGO.GetComponent<RectTransform>();
-            statusRect.sizeDelta = new Vector2(580f, 40f);
+            statusRect.sizeDelta = new Vector2(540f, 40f);
             statusRect.anchoredPosition = Vector2.zero;
             statusText = statusGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(statusText, monoFont);
@@ -369,29 +433,25 @@ namespace TelloQuest
             statusText.alignment = TextAlignmentOptions.Center;
             statusText.textWrappingMode = TextWrappingModes.NoWrap;
             statusText.overflowMode = TextOverflowModes.Ellipsis;
+        }
 
-            cursorY -= 60f;
-            BuildDivider(canvasGO.transform, cursorY, CanvasPixelWidth - 40f);
-            cursorY -= 15f;
-
-            // ---- Button legend: a true SQUARE cross zone, so all four wedges are
-            // genuinely equal - a wide/flat rectangle's corner-to-corner diagonals
-            // mathematically squish the top/bottom wedges and over-size the left/
-            // right ones, which is exactly what made "Settings" cramped and "Fly"
-            // oversized before.
-            float crossCenterY = cursorY - CrossSize / 2f;
+        /// <summary>RIGHT half: the X-cross button legend - unchanged geometry from
+        /// before (a true square gives four genuinely equal wedges), just recentered
+        /// on this half instead of the whole canvas.</summary>
+        private void BuildRightLegend(Transform parent)
+        {
             float half = CrossSize / 2f;
             float diagLength = CrossSize * 1.41421356f; // side * sqrt(2)
 
-            BuildDiagonalLine(canvasGO.transform, 0f, crossCenterY, diagLength, 45f);
-            BuildDiagonalLine(canvasGO.transform, 0f, crossCenterY, diagLength, -45f);
+            BuildDiagonalLine(parent, RightCenterX, 0f, diagLength, 45f);
+            BuildDiagonalLine(parent, RightCenterX, 0f, diagLength, -45f);
 
             // Wedge content, placed along each wedge's bisector at ~55% of the way
             // from center to the edge midpoint - keeps text clear of the diagonals.
-            settingsPrompt = BuildCrossItem(canvasGO.transform, "Settings", 0f, crossCenterY + half * 0.55f);   // North
-            galleryPrompt = BuildCrossItem(canvasGO.transform, "Gallery", -half * 0.55f, crossCenterY);          // West
-            quitPrompt = BuildCrossItem(canvasGO.transform, "Quit app", half * 0.55f, crossCenterY);             // East
-            flyPrompt = BuildCrossItem(canvasGO.transform, "Fly", 0f, crossCenterY - half * 0.55f);              // South
+            settingsPrompt = BuildCrossItem(parent, "Settings", RightCenterX, half * 0.55f);          // North
+            wifiConnectPrompt = BuildCrossItem(parent, "Connect Wi-Fi", RightCenterX - half * 0.55f, 0f); // West
+            quitPrompt = BuildCrossItem(parent, "Quit app", RightCenterX + half * 0.55f, 0f);          // East
+            flyPrompt = BuildCrossItem(parent, "Fly", RightCenterX, -half * 0.55f);                    // South
         }
 
         private void ApplyFont(TextMeshProUGUI text, TMP_FontAsset font)
@@ -400,13 +460,13 @@ namespace TelloQuest
         }
 
         /// <summary>Thin horizontal hairline, used between checklist rows and above the legend strip.</summary>
-        private void BuildDivider(Transform parent, float y, float width)
+        private void BuildDivider(Transform parent, float y, float width, float centerX = 0f)
         {
             var lineGO = new GameObject("Divider", typeof(RectTransform), typeof(Image));
             lineGO.transform.SetParent(parent, false);
             RectTransform lineRect = lineGO.GetComponent<RectTransform>();
             lineRect.sizeDelta = new Vector2(width, 1f);
-            lineRect.anchoredPosition = new Vector2(0f, y);
+            lineRect.anchoredPosition = new Vector2(centerX, y);
             Image lineImage = lineGO.GetComponent<Image>();
             lineImage.color = PanelEdge;
         }
@@ -425,19 +485,21 @@ namespace TelloQuest
             lineImage.color = PanelEdge;
         }
 
-        private SwitchRow BuildSwitchRow(Transform parent, string stepTag, string label, float y)
+        private SwitchRow BuildSwitchRow(Transform parent, string stepTag, string label, float y, float centerX, float rowWidth)
         {
             var rowGO = new GameObject($"Row_{stepTag}", typeof(RectTransform));
             rowGO.transform.SetParent(parent, false);
             RectTransform rowRect = rowGO.GetComponent<RectTransform>();
-            rowRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 56f);
-            rowRect.anchoredPosition = new Vector2(0f, y);
+            rowRect.sizeDelta = new Vector2(rowWidth, 56f);
+            rowRect.anchoredPosition = new Vector2(centerX, y);
+
+            float half = rowWidth / 2f;
 
             var tagGO = new GameObject("StepTag", typeof(RectTransform));
             tagGO.transform.SetParent(rowGO.transform, false);
             RectTransform tagRect = tagGO.GetComponent<RectTransform>();
             tagRect.sizeDelta = new Vector2(70f, 40f);
-            tagRect.anchoredPosition = new Vector2(-280f, 0f);
+            tagRect.anchoredPosition = new Vector2(-half + 40f, 0f);
             var tagText = tagGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(tagText, monoFont);
             tagText.fontSize = 12f;
@@ -448,11 +510,11 @@ namespace TelloQuest
             var labelGO = new GameObject("Label", typeof(RectTransform));
             labelGO.transform.SetParent(rowGO.transform, false);
             RectTransform labelRect = labelGO.GetComponent<RectTransform>();
-            labelRect.sizeDelta = new Vector2(380f, 40f);
-            labelRect.anchoredPosition = new Vector2(-40f, 0f);
+            labelRect.sizeDelta = new Vector2(340f, 40f);
+            labelRect.anchoredPosition = new Vector2(0f, 0f);
             var labelText = labelGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(labelText, bodyFont);
-            labelText.fontSize = 17f;
+            labelText.fontSize = 16f;
             labelText.color = Ink;
             labelText.alignment = TextAlignmentOptions.MidlineLeft;
             labelText.text = label;
@@ -461,7 +523,7 @@ namespace TelloQuest
             trackGO.transform.SetParent(rowGO.transform, false);
             RectTransform trackRect = trackGO.GetComponent<RectTransform>();
             trackRect.sizeDelta = new Vector2(54f, 26f);
-            trackRect.anchoredPosition = new Vector2(280f, 0f);
+            trackRect.anchoredPosition = new Vector2(half - 30f, 0f);
             Image track = trackGO.GetComponent<Image>();
             track.sprite = circleSprite;
             track.type = Image.Type.Simple; // stretched circle -> pill shape
@@ -553,7 +615,12 @@ namespace TelloQuest
                 if (pad != null && CanFireMenuAction)
                 {
                     if (pad.buttonSouth.wasPressedThisFrame && AllChecksOk) { EnterPiloting(); lastMenuActionTime = Time.time; }
-                    else if (pad.buttonWest.wasPressedThisFrame) { OpenSystemGallery(); lastMenuActionTime = Time.time; }
+                    // West (Connect Wi-Fi) is intentionally inactive for now - the
+                    // auto-connect flow (TelloWifiConnector.java + WifiNetworkSpecifier)
+                    // turned out to be more trouble than it was worth in testing. The
+                    // legend card stays visible (still shows "Connect Wi-Fi" + the West
+                    // prompt) so the layout doesn't need to change again if this comes
+                    // back later - it's just a no-op for now.
                     else if (pad.buttonEast.wasPressedThisFrame) { QuitApp(); lastMenuActionTime = Time.time; }
                     else if (pad.buttonNorth.wasPressedThisFrame) { EnterSettings(); lastMenuActionTime = Time.time; }
                 }
@@ -580,19 +647,29 @@ namespace TelloQuest
             // calls back into ExitSettings() when done - nothing to do here.
         }
 
-        /// <summary>Evaluates the three checks every frame regardless of which screen is
+        /// <summary>Evaluates all five checks every frame regardless of which screen is
         /// showing, so the menu always reflects live status the instant it's revealed
         /// again - no re-waiting after a flight. Only touches the visuals (switches,
         /// status bar) while the menu is actually the one on screen.</summary>
         private void UpdateChecks()
         {
+            nativeCheckTimer -= Time.deltaTime;
+            if (nativeCheckTimer <= 0f)
+            {
+                nativeCheckTimer = NativeCheckInterval;
+                bluetoothOk = CheckBluetoothEnabled();
+                wifiOk = CheckWifiEnabled();
+            }
+
             gamepadOk = gamepadController != null && gamepadController.IsGamepadConnected;
             telloOk = tello != null && tello.IsConnected;
             videoOk = videoDecoder != null && videoDecoder.FramesDecodedTotal > 0;
 
             if (state != AppState.Menu) return;
 
+            UpdateSwitch(ref bluetoothSwitch, bluetoothOk);
             UpdateSwitch(ref gamepadSwitch, gamepadOk);
+            UpdateSwitch(ref wifiSwitch, wifiOk);
             UpdateSwitch(ref telloSwitch, telloOk);
             UpdateSwitch(ref videoSwitch, videoOk);
 
@@ -604,11 +681,13 @@ namespace TelloQuest
             }
             else
             {
-                string missing = "";
-                if (!gamepadOk) missing += "gamepad ";
-                if (!telloOk) missing += "Tello wifi ";
-                else if (!videoOk) missing += "video ";
-                statusText.text = $"WAITING FOR: {missing.Trim().ToUpperInvariant()}";
+                string missing;
+                if (!bluetoothOk) missing = "bluetooth";
+                else if (!gamepadOk) missing = "gamepad";
+                else if (!wifiOk) missing = "wifi";
+                else if (!telloOk) missing = "Tello wifi";
+                else missing = "video";
+                statusText.text = $"WAITING FOR: {missing.ToUpperInvariant()}";
                 statusText.color = Amber;
                 statusBg.color = AmberDim;
             }
@@ -632,6 +711,51 @@ namespace TelloQuest
                 float pulse = (Mathf.Sin(Time.time * 4f) + 1f) * 0.5f;
                 sw.track.color = Color.Lerp(FailDim, Fail, pulse * 0.5f);
             }
+        }
+
+        /// <summary>Reads the headset's system Bluetooth-enabled state directly - not
+        /// whether a gamepad happens to be connected (that's the separate,
+        /// existing gamepad check), just whether the radio itself is on.</summary>
+        private bool CheckBluetoothEnabled()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var bluetoothAdapterClass = new AndroidJavaClass("android.bluetooth.BluetoothAdapter");
+                using var adapter = bluetoothAdapterClass.CallStatic<AndroidJavaObject>("getDefaultAdapter");
+                return adapter != null && adapter.Call<bool>("isEnabled");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TelloInitGate] Bluetooth-enabled check failed: {e.Message}");
+                return false;
+            }
+#else
+            return true; // Editor fallback - don't block testing on a check that doesn't apply outside a real device
+#endif
+        }
+
+        /// <summary>Reads the headset's system Wi-Fi-enabled state directly - not
+        /// whether it's connected to the Tello specifically (that's the separate,
+        /// existing "Tello Wi-Fi connected" check), just whether the radio is on.</summary>
+        private bool CheckWifiEnabled()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var currentActivity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                using var wifiManager = currentActivity.Call<AndroidJavaObject>("getSystemService", "wifi");
+                return wifiManager != null && wifiManager.Call<bool>("isWifiEnabled");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TelloInitGate] Wifi-enabled check failed: {e.Message}");
+                return false;
+            }
+#else
+            return true;
+#endif
         }
 
         // =================================================================
@@ -751,34 +875,109 @@ namespace TelloQuest
         // MENU ACTIONS (West / East)
         // =================================================================
         /// <summary>
-        /// Opens the Android system Photo Picker (MediaStore.ACTION_PICK_IMAGES,
-        /// Android 13+/API 33+). Switched to this after confirming via device log
-        /// that the previous generic ACTION_VIEW approach was resolving to Meta's
-        /// "MediaStub" component - which opens and immediately self-closes
-        /// ("System Defined Closure" in the log), i.e. a placeholder that was never
-        /// going to show anything. The Photo Picker is a real first-party system
-        /// UI rather than depending on some other app claiming a generic intent, so
-        /// it has a much better chance of actually working - though as with the
-        /// previous approach, this hasn't been verified working on Quest specifically,
-        /// so it still degrades gracefully (log + no crash) if it doesn't resolve.
+        /// Requests a connection to a Wi-Fi network whose SSID starts with
+        /// telloSsidPrefix ("TELLO-" by default), via Android's modern
+        /// WifiNetworkSpecifier API (API 29+) - the correct, current way for an
+        /// app to connect to a specific device's own hotspot without needing the
+        /// location permission the older scan-based APIs require. Android shows a
+        /// one-time system confirmation dialog the first time; after that it's
+        /// just this one button press instead of leaving the app, digging through
+        /// system Wi-Fi settings, finding the right network, and coming back.
+        ///
+        /// If Wi-Fi itself is off, this can't do anything useful - apps haven't
+        /// been able to silently turn Wi-Fi on since Android 10 (WifiManager.
+        /// setWifiEnabled() is a no-op for regular apps on modern Android). So in
+        /// that case, this opens the system's quick Wi-Fi panel instead (stays
+        /// mostly in-app, one tap to enable), so the pilot can turn it on
+        /// themselves and press West again. The quick panel intent isn't
+        /// guaranteed present on every device/build (confirmed via research it
+        /// can throw ActivityNotFoundException in some cases) - falls back to the
+        /// full Wi-Fi settings screen if so, which is old enough to be reliably
+        /// present everywhere.
+        ///
+        /// This needs a small compiled Java helper alongside this script:
+        /// ConnectivityManager.NetworkCallback (the object that receives
+        /// onAvailable/onLost/onUnavailable) is a concrete Java CLASS, not an
+        /// interface - Unity's AndroidJavaProxy can only implement interfaces (it
+        /// works via Java's dynamic Proxy mechanism, which can't subclass a
+        /// concrete class), so this couldn't be done from C# reflection alone the
+        /// way the rest of this project's Android interop has been. The helper -
+        /// TelloWifiConnector.java - needs to live at:
+        ///   Assets/Plugins/Android/src/main/java/com/tello4quest2/TelloWifiConnector.java
+        /// Unity compiles any .java source dropped there automatically as part of
+        /// the normal Gradle build - no separate AAR project needed.
+        ///
+        /// The Java side reports back via UnitySendMessage to
+        /// OnTelloWifiConnected(string)/OnTelloWifiLost(string) below.
         /// </summary>
-        private void OpenSystemGallery()
+        private void ConnectToTelloWifi()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
+            if (!wifiOk)
+            {
+                OpenWifiSettingsPanel();
+                return;
+            }
+
+            try
+            {
+                using var connectorClass = new AndroidJavaClass("com.tello4quest2.TelloWifiConnector");
+                connectorClass.CallStatic("connect", telloSsidPrefix, gameObject.name);
+                Debug.Log($"[TelloInitGate] Requesting a connection to a Wi-Fi network starting with '{telloSsidPrefix}'... Android may show a one-time confirmation dialog.");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TelloInitGate] Could not request a Tello Wi-Fi connection: {e.Message}");
+            }
+#else
+            Debug.Log("[TelloInitGate] Wi-Fi connect requested (no-op outside an Android build).");
+#endif
+        }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        private void OpenWifiSettingsPanel()
+        {
             try
             {
                 using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
                 using var currentActivity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-                using var intentObject = new AndroidJavaObject("android.content.Intent", "android.provider.action.PICK_IMAGES");
+                using var intentObject = new AndroidJavaObject("android.content.Intent", "android.settings.panel.action.INTERNET_CONNECTIVITY");
                 currentActivity.Call("startActivity", intentObject);
+                Debug.Log("[TelloInitGate] Wi-Fi is off - opened the quick internet settings panel so it can be turned on. Press West again once it's on.");
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[TelloInitGate] Could not open the system photo picker: {e.Message}");
+                Debug.LogWarning($"[TelloInitGate] Quick Wi-Fi panel not available ({e.Message}) - falling back to the full Wi-Fi settings screen.");
+                try
+                {
+                    using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                    using var currentActivity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                    using var fallbackIntent = new AndroidJavaObject("android.content.Intent", "android.settings.WIFI_SETTINGS");
+                    currentActivity.Call("startActivity", fallbackIntent);
+                }
+                catch (Exception fallbackException)
+                {
+                    Debug.LogWarning($"[TelloInitGate] Could not open Wi-Fi settings at all: {fallbackException.Message}");
+                }
             }
-#else
-            Debug.Log("[TelloInitGate] Open gallery requested (no-op outside an Android build).");
+        }
 #endif
+
+        /// <summary>Called via UnitySendMessage from TelloWifiConnector.java once the
+        /// system either connects ("1") or gives up ("0"). Purely informational -
+        /// the "Tello Wi-Fi connected" checklist item picks up the actual result on
+        /// its own once TelloConnection's own handshake succeeds or doesn't.</summary>
+        public void OnTelloWifiConnected(string success)
+        {
+            if (success == "1") Debug.Log("[TelloInitGate] Connected to a Tello Wi-Fi network.");
+            else Debug.LogWarning("[TelloInitGate] Could not find/connect to a Tello Wi-Fi network (SSID starting with the configured prefix). Make sure the Tello is powered on and nearby.");
+        }
+
+        /// <summary>Called via UnitySendMessage from TelloWifiConnector.java if the
+        /// Tello Wi-Fi connection drops after having been established.</summary>
+        public void OnTelloWifiLost(string _)
+        {
+            Debug.LogWarning("[TelloInitGate] Lost the Tello Wi-Fi connection.");
         }
 
         private void QuitApp()

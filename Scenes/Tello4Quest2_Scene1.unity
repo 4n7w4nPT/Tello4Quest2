@@ -171,6 +171,13 @@ MonoBehaviour:
   enableDeadReckoning: 1
   enableFlightLog: 0
   flightLogFolderName: TelloFlightLogs
+  fastDescentThresholdCmPerSec: 150
+  temperatureFastRiseThresholdC: 3
+  temperatureNearCriticalMarginC: 5
+  windDriftSpeedThresholdCmPerSec: 40
+  windDriftMaxCommandedInput: 10
+  trailSampleDistanceCm: 18
+  maxTrailPoints: 500
   autoRetryIntervalSeconds: 2
 --- !u!4 &122290290
 Transform:
@@ -222,8 +229,12 @@ MonoBehaviour:
   videoScreen: {fileID: 561222205}
   cardCornerRadiusPx: 14
   gap: 0.01
+  cockpitAngleDegrees: 20
   positionedExternally: 1
   maxEntries: 16
+  oldestEntryAlpha: 0.3
+  miniMapMinDisplayRadiusCm: 100
+  miniMapZoomSmoothing: 3
 --- !u!4 &298983489
 Transform:
   m_ObjectHideFlags: 0
@@ -336,6 +347,11 @@ MonoBehaviour:
   defaultZoomLevel: 3
   sizeMultiplier: 1
   opacity: 1
+  whiteBalanceShift: 0
+  brightness: 0
+  contrast: 1
+  nightModeStrength: 0.35
+  sharpenStrength: 0.4
   useTestTexture: 0
   customTestTexture: {fileID: 0}
   assumedEyeHeightMeters: 1.6
@@ -542,7 +558,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: UnityEngine.XR.LegacyInputHelpers::UnityEditor.XR.LegacyInputHelpers.CameraOffset
   m_CameraFloorOffsetObject: {fileID: 1089214667}
-  m_RequestedTrackingMode: 0
+  m_RequestedTrackingMode: 1
   m_TrackingOriginMode: 1
   m_CameraYOffset: 1.36144
 --- !u!4 &587930767
@@ -635,7 +651,7 @@ MonoBehaviour:
   requestRecordAudioPermissionOnStartup: 0
   requestPassthroughCameraAccessPermissionOnStartup: 0
   _localDimming: 1
-  _trackingOriginType: 1
+  _trackingOriginType: 0
   usePositionTracking: 1
   useRotationTracking: 1
   useIPDInPositionTracking: 1
@@ -760,6 +776,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TelloQuest.TelloVideoRecorder
   videoReceiver: {fileID: 1275375341}
+  videoDecoder: {fileID: 0}
+  videoWidthPx: 960
+  videoHeightPx: 720
   videoSaveFolderName: TelloRecordings
 --- !u!1 &1531549294
 GameObject:
@@ -791,13 +810,16 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TelloQuest.TelloSpatialPanel
   tello: {fileID: 122290289}
+  videoDecoder: {fileID: 1275375340}
   videoScreen: {fileID: 561222205}
   cardCornerRadiusPx: 14
   gap: 0.01
+  cockpitAngleDegrees: 20
   positionedExternally: 1
-  maxDisplayAcceleration: 400
-  trailSampleInterval: 0.09
-  trailLength: 8
+  sampleIntervalSeconds: 1
+  initialWindowSeconds: 120
+  windowSmoothing: 3
+  fpsGraphMax: 30
 --- !u!4 &1531549296
 Transform:
   m_ObjectHideFlags: 0
@@ -943,8 +965,9 @@ MonoBehaviour:
   distanceFromCamera: 1.2
   assumedEyeHeightMeters: 1.6
   verticalOffset: -0.3
-  worldWidth: 0.9
+  worldWidth: 2.2
   cornerRadiusPx: 20
+  telloSsidPrefix: TELLO-
   displayFont: {fileID: 11400000, guid: 23a60abf9dc3e594db8f8c89dd9e540e, type: 2}
   bodyFont: {fileID: 11400000, guid: 752968831af0a8044b8e6e10aa2aec25, type: 2}
   monoFont: {fileID: 11400000, guid: c0e45f70d32291a439984d50683cd1ad, type: 2}

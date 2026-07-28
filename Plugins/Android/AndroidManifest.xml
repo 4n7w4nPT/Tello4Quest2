@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This is the REAL manifest Unity/Meta XR generate for this project (grabbed
+  from Library/Bee/Android/.../unityLibrary/src/main/AndroidManifest.xml),
+  used as the base instead of a minimal permissions-only fragment - a
+  previous minimal version caused Unity's build to treat it as the
+  authoritative manifest rather than merely merging into Unity's own, which
+  left the <activity> tag without its required android:name.
+
+  The ONLY change from that generated file: added
+  android:name="com.unity3d.player.UnityPlayerGameActivity" to the
+  <activity> tag - Unity 6's default activity class (confirmed via multiple
+  sources specifically discussing this exact "Missing 'name' key attribute
+  on element activity" error on Unity 6 + Meta XR projects). Everything else
+  is preserved exactly as generated - the two ACCESS_WIFI_STATE/
+  ACCESS_NETWORK_STATE permission lines were already merged in correctly
+  from before, kept as-is.
+
+  Place this at: Assets/Plugins/Android/AndroidManifest.xml
+  (overwrite the file you have there now)
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:horizonos="http://schemas.horizonos/sdk" xmlns:tools="http://schemas.android.com/tools">
+  <supports-gl-texture android:name="GL_KHR_texture_compression_astc_ldr" />
+  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-feature android:name="android.hardware.vulkan.version" android:required="true" />
+  <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+  <uses-feature android:name="android.hardware.touchscreen.multitouch" android:required="false" />
+  <uses-feature android:name="android.hardware.touchscreen.multitouch.distinct" android:required="false" />
+  <application android:appCategory="game" android:enableOnBackInvokedCallback="true" android:extractNativeLibs="true" android:label="@string/app_name" android:icon="@mipmap/app_icon" android:allowBackup="false" android:networkSecurityConfig="@xml/network_sec_config">
+    <meta-data android:name="unity.splash-mode" android:value="0" />
+    <meta-data android:name="unity.splash-enable" android:value="True" />
+    <meta-data android:name="unity.requested-visible-insets" android:value="" />
+    <meta-data android:name="unity.system-bars-behavior" android:value="ShowTransientBarsBySwipe" />
+    <meta-data android:name="unity.render-outside-safearea" android:value="True" />
+    <meta-data android:name="notch.config" android:value="portrait|landscape" />
+    <meta-data android:name="unity.auto-report-fully-drawn" android:value="true" />
+    <meta-data android:name="unity.strip-engine-code" android:value="false" />
+    <meta-data android:name="unity.run-without-focus" android:value="true" />
+    <meta-data android:name="unity.auto-set-game-state" android:value="true" />
+    <activity android:name="com.unity3d.player.UnityPlayerGameActivity">
+      <intent-filter>
+        <category android:name="com.oculus.intent.category.VR" />
+      </intent-filter>
+      <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+    </activity>
+    <meta-data android:name="com.oculus.ossplash.background" android:value="passthrough-contextual" />
+    <meta-data android:name="com.oculus.telemetry.project_guid" android:value="6b2ea1c7-74ac-407c-94cf-d3163a69ef80" />
+    <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" tools:replace="android:value" />
+  </application>
+  <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
+  <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+  <horizonos:uses-horizonos-sdk horizonos:minSdkVersion="60" horizonos:targetSdkVersion="203" />
+</manifest>
