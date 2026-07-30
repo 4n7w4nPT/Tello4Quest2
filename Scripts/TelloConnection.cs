@@ -425,6 +425,17 @@ namespace TelloQuest
             }
         }
 
+        [Tooltip("Logge aussi les commandes 'rc' de pilotage. Elles partent a 18 Hz, donc ~1500 lignes par session : a n'activer que pour deboguer le pilotage.")]
+        [SerializeField] private bool logRcCommands = false;
+
+        [Header("=== QUALITE DU FLUX VIDEO (SDK 2.0 / EDU uniquement) ===")]
+        [Tooltip("Envoie 'setbitrate' apres 'streamon'. ATTENTION : ces commandes n'existent QUE sur Tello EDU / Talent (SDK 2.0+). Sur un Tello grand public (SDK 1.3) elles repondent 'error' - inoffensif, mais la pastille 'Last cmd' passera au rouge. Verifie d'abord la ligne '[TelloConnection] Tello SDK version:' dans le log : si elle affiche 20 ou 30, coche ceci ; si elle affiche 1.3 ou rien, laisse decoche.")]
+        [SerializeField] private bool sendStreamQualityCommands = false;
+        [Tooltip("Debit video en Mbit/s. 0 = auto (le defaut du drone, qui descend assez agressivement et coute en qualite d'image). 1 a 5 = valeur fixe ; 5 est le maximum et le meilleur choix a portee courte.")]
+        [SerializeField, Range(0, 5)] private int videoBitrateMbps = 5;
+        [Tooltip("Envoie aussi 'setresolution high' et 'setfps high'. Meme restriction SDK 2.0+ que ci-dessus. Passe le flux en 720p a la cadence la plus elevee disponible.")]
+        [SerializeField] private bool requestHighResolutionAndFps = false;
+
         [Header("=== AUTO-RETRY WHILE DISCONNECTED ===")]
         [Tooltip("How often to automatically retry the connection while in Disconnected/Error state - deliberately not too aggressive, a real handshake attempt is heavier than just checking a status flag.")]
         [SerializeField] private float autoRetryIntervalSeconds = 2f;
@@ -712,7 +723,12 @@ namespace TelloQuest
                 byte[] data = Encoding.ASCII.GetBytes(cmd);
                 commandClient.Send(data, data.Length, telloEndPoint);
                 lastCommandSent = cmd;
-                Debug.Log($"[Tello >>] {cmd}");
+                // La commande "rc" part a 18 Hz : la logger produisait ~1500 Debug.Log
+                // par session (mesure sur un log reel), chacun partant vers logcat avec
+                // une interpolation de chaine. Les commandes ponctuelles, elles, restent
+                // loggees : c'est le seul moyen de suivre ce que le drone recoit.
+                if (logRcCommands || !cmd.StartsWith("rc ", StringComparison.Ordinal))
+                    Debug.Log($"[Tello >>] {cmd}");
             }
             catch (Exception e)
             {
@@ -827,7 +843,36 @@ namespace TelloQuest
             commandedSpeed = clamped;
         }
 
-        public void StreamOn() { SendCommand("streamon"); IsStreaming = true; }
+        /// <summary>
+        /// Demarre le flux video, puis - si sendStreamQualityCommands est actif -
+        /// demande explicitement un debit fixe plutot que le mode auto du drone.
+        ///
+        /// Pourquoi ca compte : en mode auto, l'encodeur du Tello baisse son debit
+        /// des que la liaison bronche, et il remonte lentement. Sur une session
+        /// reelle, on passe donc une bonne partie du vol en dessous de ce que le
+        /// lien pourrait porter. Fixer le debit est le SEUL reglage qui augmente la
+        /// qualite A LA SOURCE - tout le reste du pipeline ne fait que mieux
+        /// afficher ce que le drone a deja envoye.
+        ///
+        /// Ces commandes appartiennent au SDK 2.0 (Tello EDU / Talent). Sur un Tello
+        /// grand public elles renvoient "error" : sans consequence pour le vol ni
+        /// pour le flux, mais la pastille "Last cmd" de TelloStatusPanel passera au
+        /// rouge, d'ou le fait qu'elles soient decochees par defaut.
+        /// </summary>
+        public void StreamOn()
+        {
+            SendCommand("streamon");
+            IsStreaming = true;
+
+            if (!sendStreamQualityCommands) return;
+
+            SendCommand($"setbitrate {Mathf.Clamp(videoBitrateMbps, 0, 5)}");
+            if (requestHighResolutionAndFps)
+            {
+                SendCommand("setresolution high");
+                SendCommand("setfps high");
+            }
+        }
         /// <summary>
         /// On connect, this is sent immediately before "streamon" (not on its own) to force
         /// the Tello's video encoder to restart. Without this, "streamon" on a drone whose

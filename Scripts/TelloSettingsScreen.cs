@@ -8,39 +8,50 @@ using UnityEngine.UI;
 namespace TelloQuest
 {
     /// <summary>
-    /// Settings screen, reached from the Menu screen via North (see TelloInitGate).
-    /// Same visual language as the Menu screen: same nameplate header style (title
-    /// swapped for "PARAMETERS"), and a matching 3-card footer bar (Confirm & Exit /
-    /// Reset to Defaults / Exit Without Saving) using the exact same action/PRESS/
-    /// identifier card format as the Menu screen's X-cross legend, separated by thin
-    /// vertical dividers. In between, a scrollable, sectioned list of every
-    /// non-technical tunable in the app (flight safety thresholds, gamepad feel,
-    /// panel placement) - deliberately excludes networking/protocol internals (rc
-    /// send rate, command timeouts, UDP frame buffering...), which stay
-    /// Inspector-only: those are reliability knobs, not something to expose to a
-    /// pilot mid-session.
+    /// Ecran de parametres, atteint depuis le menu (voir TelloInitGate). Il porte
+    /// DEUX pages distinctes, construites toutes les deux au demarrage et affichees
+    /// l'une ou l'autre selon le bouton presse dans le menu :
     ///
-    /// Controls: Left stick Y moves the row selector up/down one row at a time
-    /// (debounced), auto-scrolling the list to keep the selection in view. Right
-    /// stick X adjusts the selected row's value continuously while held (numeric
-    /// rows), or snaps a boolean row true/false past a small deadzone. South saves
-    /// every pending value to its owning component AND to PlayerPrefs (so it
-    /// survives an app restart), then returns to the menu. East discards
-    /// everything and returns without touching anything. North resets every pending
-    /// value back to its default (visible immediately, not applied/saved until
-    /// South is pressed afterward) - a quick way back to a known-good state without
-    /// having to remember what everything used to be.
+    ///   - SettingsPage.Video   (Nord)  : tout ce qui touche au rendu de l'image -
+    ///     placement de l'ecran, colorimetrie, nettete, mode nuit, decodage.
+    ///   - SettingsPage.General (Ouest) : tout le reste - securite de vol, manette,
+    ///     cockpit, journalisation.
+    ///
+    /// Les deux pages vivent sur le MEME GameObject : aucune manipulation de scene
+    /// n'est necessaire, il suffit que TelloInitGate appelle RevealAt() avec la page
+    /// voulue.
+    ///
+    /// Chaque page conserve sa propre selection de ligne et sa propre position de
+    /// defilement, donc revenir sur une page la retrouve la ou on l'avait laissee.
+    ///
+    /// Commandes : stick gauche haut/bas = changer de ligne (avec repetition
+    /// temporisee), stick droit gauche/droite = regler la valeur de la ligne
+    /// selectionnee (continu sur un curseur, bascule au-dela d'une petite zone morte
+    /// sur un interrupteur). Sud = appliquer et enregistrer (composants + PlayerPrefs,
+    /// donc ca survit a un redemarrage). Est = sortir sans rien toucher. Nord =
+    /// remettre toute la page a ses valeurs par defaut (visible immediatement, mais
+    /// pas applique tant que Sud n'a pas ete presse).
+    ///
+    /// Les reglages purement techniques (cadence d'envoi rc, timeouts de commande,
+    /// bufferisation UDP) restent volontairement dans l'Inspector : ce sont des
+    /// leviers de fiabilite, pas des reglages a exposer a un pilote en session.
     /// </summary>
     public class TelloSettingsScreen : MonoBehaviour
     {
+        public enum SettingsPage { Video, General }
+
         [SerializeField] private TelloInitGate initGate;
         [SerializeField] private TelloConnection tello;
         [SerializeField] private TelloGamepadController gamepadController;
         [SerializeField] private TelloVideoDisplay videoScreen;
         [SerializeField] private TelloSpatialPanel spatialPanel;
         [SerializeField] private TelloStatusPanel statusPanel;
+        [Tooltip("Optionnel - retrouve automatiquement dans la scene s'il n'est pas assigne.")]
+        [SerializeField] private TelloVideoDecoder videoDecoder;
+        [Tooltip("Optionnel - retrouve automatiquement dans la scene s'il n'est pas assigne.")]
+        [SerializeField] private TelloActionLogPanel actionLogPanel;
 
-        [Tooltip("How fast Right Stick X moves the selected value across its full range, in seconds for a full sweep at max deflection.")]
+        [Tooltip("Vitesse de balayage du stick droit : duree, en secondes, pour parcourir toute la plage d'un curseur a fond de manche.")]
         [SerializeField] private float secondsForFullSweep = 1.5f;
 
         [Header("=== PLACEMENT ===")]
@@ -58,17 +69,32 @@ namespace TelloQuest
         private const float CanvasPixelHeight = 820f;
         private const float ContentWidth = CanvasPixelWidth - 60f;
         private const float ViewportHeight = 560f;
-        private const float RowHeight = 52f;
-        private const float SectionHeaderHeight = 34f;
-        private const float BottomPadding = 40f; // extra slack under the last row - see UpdateScroll comment
+        private const float RowHeight = 56f;
+        private const float SectionHeaderHeight = 44f;
+        private const float BottomPadding = 40f;
 
-        // Same aviation-instrument palette as TelloInitGate.
+        // --- Geometrie d'une ligne ---
+        private const float LabelX = -200f;
+        private const float LabelWidth = 270f;
+        private const float ValueX = 252f;
+        private const float SliderCentreX = 55f;
+        private const float RailWidth = 220f;
+        private const float RailHeight = 6f;
+        private const float ControlY = -38f;
+        private const int TickCount = 11;
+
+        // Meme palette instrument que TelloInitGate.
         private static readonly Color PanelBg = HexColor("#15181B");
         private static readonly Color PanelEdge = HexColor("#262B30");
         private static readonly Color Ink = HexColor("#EDEAE3");
         private static readonly Color InkDim = HexColor("#8A8F94");
         private static readonly Color Amber = HexColor("#E8A33D");
+        private static readonly Color AmberDeep = HexColor("#8A5F1F");
         private static readonly Color TrackBg = HexColor("#262B30");
+        private static readonly Color RowSelectedBg = new Color(0.910f, 0.639f, 0.239f, 0.10f);
+        private static readonly Color RowClearBg = new Color(0f, 0f, 0f, 0f);
+        private static readonly Color SwitchOffTrack = HexColor("#2E3439");
+        private static readonly Color TickColor = HexColor("#3A4149");
 
         private static Color HexColor(string hex)
         {
@@ -78,13 +104,14 @@ namespace TelloQuest
 
         private Sprite roundedSprite;
         private Sprite circleSprite;
+        private Sprite handleSprite;
         private CanvasGroup canvasGroup;
         private RectTransform viewportRect;
-        private RectTransform contentRect;
         private Image scrollThumb;
         private TextMeshProUGUI savePrompt;
         private TextMeshProUGUI resetPrompt;
         private TextMeshProUGUI cancelPrompt;
+        private TextMeshProUGUI subtitleText;
 
         private enum RowKind { Float, Bool }
 
@@ -102,18 +129,45 @@ namespace TelloQuest
             public Func<bool> getBool;
             public Action<bool> setBool;
 
+            public Image selectionBg;
             public TextMeshProUGUI labelText;
-            public Image fillImage;
-            public RectTransform trackRect;
             public TextMeshProUGUI valueText;
-            public float rowY; // this row's Y position within Content, captured at build time
+
+            // Curseur
+            public GameObject sliderRoot;
+            public RectTransform fillRect;
+            public Image fillImage;
+            public RectTransform handleRect;
+            public RectTransform handleEdge;
+            public Image handleImage;
+
+            // Interrupteur
+            public GameObject switchRoot;
+            public Image switchTrack;
+            public RectTransform switchKnob;
+            public Image switchKnobImage;
+
+            public float rowY;
         }
 
-        private readonly List<SettingsRow> rows = new List<SettingsRow>();
-        private readonly List<Action> saveActions = new List<Action>(); // one per owning component, called once each on save
-        private int selectedRow;
-        private float contentScrollY; // current (animated) Content.anchoredPosition.y
-        private float contentHeight;
+        /// <summary>Une page complete : son conteneur defilant, ses lignes, ses actions
+        /// de sauvegarde, et son propre etat de navigation.</summary>
+        private class PageData
+        {
+            public SettingsPage page;
+            public string subtitle;
+            public GameObject root;
+            public RectTransform contentRect;
+            public readonly List<SettingsRow> rows = new List<SettingsRow>();
+            public readonly List<Action> saveActions = new List<Action>();
+            public float contentHeight;
+            public int selectedRow;
+            public float scrollY;
+        }
+
+        private PageData videoPage;
+        private PageData generalPage;
+        private PageData activePage;
 
         private const float RowSelectRepeatDelay = 0.22f;
         private float rowSelectCooldown;
@@ -122,28 +176,41 @@ namespace TelloQuest
         {
             roundedSprite = TelloUiKit.GetRoundedSprite(cornerRadiusPx);
             circleSprite = TelloUiKit.GetRoundedSprite(10000f);
+            handleSprite = TelloUiKit.GetRoundedSprite(7f);
+
+            if (videoDecoder == null) videoDecoder = FindObjectOfType<TelloVideoDecoder>();
+            if (actionLogPanel == null) actionLogPanel = FindObjectOfType<TelloActionLogPanel>();
+
             BuildUI();
         }
 
-        /// <summary>Called by TelloInitGate when entering Settings - snapshots every
-        /// row's current live value as the starting point for editing.</summary>
-        public void RevealAt(Vector3 position, Quaternion rotation)
+        /// <summary>Appele par TelloInitGate. Bascule sur la page demandee et
+        /// re-echantillonne toutes ses lignes depuis les valeurs live.</summary>
+        public void RevealAt(Vector3 position, Quaternion rotation, SettingsPage page)
         {
             transform.position = position;
             transform.rotation = rotation;
 
-            foreach (var row in rows)
+            SetActivePage(page);
+
+            foreach (var row in activePage.rows)
             {
                 if (row.kind == RowKind.Float && row.getFloat != null) row.floatValue = row.getFloat();
                 else if (row.kind == RowKind.Bool && row.getBool != null) row.boolValue = row.getBool();
             }
 
-            selectedRow = 0;
-            contentScrollY = 0f;
             RefreshRows();
 
             canvasGroup.alpha = 0f;
             StartCoroutine(FadeIn());
+        }
+
+        private void SetActivePage(SettingsPage page)
+        {
+            activePage = page == SettingsPage.Video ? videoPage : generalPage;
+            if (videoPage != null) videoPage.root.SetActive(activePage == videoPage);
+            if (generalPage != null) generalPage.root.SetActive(activePage == generalPage);
+            if (subtitleText != null) subtitleText.text = activePage.subtitle;
         }
 
         private System.Collections.IEnumerator FadeIn()
@@ -161,6 +228,8 @@ namespace TelloQuest
 
         private void Update()
         {
+            if (activePage == null) return;
+
             Gamepad pad = TelloUiKit.GetActiveGamepad();
             if (pad == null) return;
 
@@ -168,15 +237,15 @@ namespace TelloQuest
             Vector2 right = pad.rightStick.ReadValue();
 
             rowSelectCooldown -= Time.deltaTime;
-            if (rowSelectCooldown <= 0f && rows.Count > 0)
+            if (rowSelectCooldown <= 0f && activePage.rows.Count > 0)
             {
-                if (left.y > 0.5f) { selectedRow = Mathf.Max(0, selectedRow - 1); rowSelectCooldown = RowSelectRepeatDelay; }
-                else if (left.y < -0.5f) { selectedRow = Mathf.Min(rows.Count - 1, selectedRow + 1); rowSelectCooldown = RowSelectRepeatDelay; }
+                if (left.y > 0.5f) { activePage.selectedRow = Mathf.Max(0, activePage.selectedRow - 1); rowSelectCooldown = RowSelectRepeatDelay; }
+                else if (left.y < -0.5f) { activePage.selectedRow = Mathf.Min(activePage.rows.Count - 1, activePage.selectedRow + 1); rowSelectCooldown = RowSelectRepeatDelay; }
             }
 
-            if (rows.Count > 0)
+            if (activePage.rows.Count > 0)
             {
-                SettingsRow row = rows[selectedRow];
+                SettingsRow row = activePage.rows[activePage.selectedRow];
                 if (Mathf.Abs(right.x) > 0.15f)
                 {
                     if (row.kind == RowKind.Float)
@@ -184,7 +253,7 @@ namespace TelloQuest
                         float t = Time.deltaTime / secondsForFullSweep;
                         row.floatValue = Mathf.Clamp(row.floatValue + right.x * t * (row.max - row.min), row.min, row.max);
                     }
-                    else if (row.kind == RowKind.Bool)
+                    else
                     {
                         row.boolValue = right.x > 0f;
                     }
@@ -199,26 +268,20 @@ namespace TelloQuest
             else if (pad.buttonNorth.wasPressedThisFrame) ResetToDefaults();
         }
 
-        /// <summary>Keeps the selected row inside the viewport, animating Content's
-        /// position toward the target rather than snapping - and drives the visual
-        /// scroll-position indicator on the right edge from the same value.
-        /// contentHeight includes BottomPadding beyond the last row, so scrolling to
-        /// the very end always leaves the last row fully clear of the viewport's
-        /// bottom edge instead of sitting flush against it.</summary>
         private void UpdateScroll()
         {
-            if (rows.Count == 0) return;
+            if (activePage.rows.Count == 0) return;
 
-            float rowY = rows[selectedRow].rowY;
-            float maxScroll = Mathf.Max(0f, contentHeight - ViewportHeight);
+            float rowY = activePage.rows[activePage.selectedRow].rowY;
+            float maxScroll = Mathf.Max(0f, activePage.contentHeight - ViewportHeight);
             float target = Mathf.Clamp(-rowY - ViewportHeight * 0.5f + RowHeight * 0.5f, 0f, maxScroll);
-            contentScrollY = Mathf.Lerp(contentScrollY, target, Time.deltaTime * 10f);
-            contentRect.anchoredPosition = new Vector2(0f, contentScrollY);
+            activePage.scrollY = Mathf.Lerp(activePage.scrollY, target, Time.deltaTime * 10f);
+            activePage.contentRect.anchoredPosition = new Vector2(0f, activePage.scrollY);
 
-            if (contentHeight > ViewportHeight)
+            if (activePage.contentHeight > ViewportHeight)
             {
-                float thumbHeightFrac = Mathf.Clamp01(ViewportHeight / contentHeight);
-                float scrollFrac = maxScroll > 0f ? contentScrollY / maxScroll : 0f;
+                float thumbHeightFrac = Mathf.Clamp01(ViewportHeight / activePage.contentHeight);
+                float scrollFrac = maxScroll > 0f ? activePage.scrollY / maxScroll : 0f;
                 float thumbH = ViewportHeight * thumbHeightFrac;
                 float thumbY = -(ViewportHeight - thumbH) * scrollFrac;
                 scrollThumb.rectTransform.sizeDelta = new Vector2(6f, thumbH);
@@ -227,30 +290,29 @@ namespace TelloQuest
             }
             else
             {
-                scrollThumb.enabled = false; // everything fits - no need for a thumb at all
+                scrollThumb.enabled = false;
             }
         }
 
         private void SaveAndExit()
         {
-            foreach (var row in rows)
+            foreach (var row in activePage.rows)
             {
                 if (row.kind == RowKind.Float) row.setFloat?.Invoke(row.floatValue);
-                else if (row.kind == RowKind.Bool) row.setBool?.Invoke(row.boolValue);
+                else row.setBool?.Invoke(row.boolValue);
             }
-            foreach (var save in saveActions) save?.Invoke();
+            foreach (var save in activePage.saveActions) save?.Invoke();
             Close();
         }
 
         private void CancelAndExit() => Close();
 
-        /// <summary>Resets every row's PENDING value to its default - visible
-        /// immediately on the sliders/toggles, but not applied to the live
-        /// components or persisted until South (Save) is pressed afterward. Doesn't
-        /// exit the screen, so the pilot can review the restored values first.</summary>
+        /// <summary>Remet les valeurs EN ATTENTE de la page courante a leur defaut -
+        /// visible immediatement, mais applique et persiste seulement si Sud est
+        /// presse ensuite. L'ecran ne se ferme pas, pour laisser relire.</summary>
         private void ResetToDefaults()
         {
-            foreach (var row in rows)
+            foreach (var row in activePage.rows)
             {
                 if (row.kind == RowKind.Float) row.floatValue = row.defaultFloat;
                 else row.boolValue = row.defaultBool;
@@ -264,7 +326,7 @@ namespace TelloQuest
         }
 
         // =================================================================
-        // UI CONSTRUCTION
+        // CONSTRUCTION
         // =================================================================
         private void BuildUI()
         {
@@ -282,11 +344,12 @@ namespace TelloQuest
             BuildHeader(canvasGO.transform);
             BuildScrollArea(canvasGO.transform);
             BuildFooter(canvasGO.transform);
-            BuildAllRows();
+
+            videoPage = BuildPage(SettingsPage.Video, "VIDEO PARAMETERS");
+            generalPage = BuildPage(SettingsPage.General, "FLIGHT PARAMETERS");
+            SetActivePage(SettingsPage.Video);
         }
 
-        /// <summary>Same nameplate layout as TelloInitGate's header - amber mark, title,
-        /// subtitle - just with "PARAMETERS" instead of "PRE FLIGHT CHECK".</summary>
         private void BuildHeader(Transform parent)
         {
             const float headerY = 370f;
@@ -316,25 +379,20 @@ namespace TelloQuest
             var subtitleGO = new GameObject("Subtitle", typeof(RectTransform));
             subtitleGO.transform.SetParent(parent, false);
             RectTransform subtitleRect = subtitleGO.GetComponent<RectTransform>();
-            subtitleRect.sizeDelta = new Vector2(180f, 30f);
-            subtitleRect.anchoredPosition = new Vector2(235f, headerY);
-            var subtitle = subtitleGO.AddComponent<TextMeshProUGUI>();
-            ApplyFont(subtitle, monoFont);
-            subtitle.text = "PARAMETERS";
-            subtitle.fontSize = 12f;
-            subtitle.color = InkDim;
-            subtitle.alignment = TextAlignmentOptions.MidlineRight;
-            subtitle.textWrappingMode = TextWrappingModes.NoWrap;
-            subtitle.overflowMode = TextOverflowModes.Ellipsis;
+            subtitleRect.sizeDelta = new Vector2(240f, 30f);
+            subtitleRect.anchoredPosition = new Vector2(205f, headerY);
+            subtitleText = subtitleGO.AddComponent<TextMeshProUGUI>();
+            ApplyFont(subtitleText, monoFont);
+            subtitleText.text = "PARAMETERS";
+            subtitleText.fontSize = 12f;
+            subtitleText.color = InkDim;
+            subtitleText.alignment = TextAlignmentOptions.MidlineRight;
+            subtitleText.textWrappingMode = TextWrappingModes.NoWrap;
+            subtitleText.overflowMode = TextOverflowModes.Ellipsis;
 
             BuildDivider(parent, headerY - 27f);
         }
 
-        /// <summary>Footer: three equal cards (Confirm & Exit / Reset to Defaults /
-        /// Exit Without Saving) separated by thin vertical dividers, each using the
-        /// same action/PRESS/identifier format as the Menu screen's X-cross wedges -
-        /// a previous version showed a single combined "Press X" line here, which
-        /// didn't match and couldn't show an icon glyph alongside the word "Press".</summary>
         private void BuildFooter(Transform parent)
         {
             const float footerDividerY = -240f;
@@ -363,8 +421,7 @@ namespace TelloQuest
             RectTransform lineRect = lineGO.GetComponent<RectTransform>();
             lineRect.sizeDelta = new Vector2(CanvasPixelWidth - 40f, 1f);
             lineRect.anchoredPosition = new Vector2(0f, y);
-            Image lineImage = lineGO.GetComponent<Image>();
-            lineImage.color = PanelEdge;
+            lineGO.GetComponent<Image>().color = PanelEdge;
         }
 
         private void BuildVerticalDivider(Transform parent, float x, float centerY)
@@ -374,14 +431,9 @@ namespace TelloQuest
             RectTransform lineRect = lineGO.GetComponent<RectTransform>();
             lineRect.sizeDelta = new Vector2(1f, 90f);
             lineRect.anchoredPosition = new Vector2(x, centerY);
-            Image lineImage = lineGO.GetComponent<Image>();
-            lineImage.color = PanelEdge;
+            lineGO.GetComponent<Image>().color = PanelEdge;
         }
 
-        /// <summary>One footer card's content: action word, static "PRESS" label, and
-        /// the button identifier row (icon glyph or bare button name, resolved via
-        /// TelloInitGate.ResolveButtonText - see SetFooterPrompt), matching
-        /// TelloInitGate's X-cross wedge layout exactly.</summary>
         private TextMeshProUGUI BuildFooterCard(Transform parent, string action, float x, float y)
         {
             var itemGO = new GameObject($"Footer_{action}", typeof(RectTransform));
@@ -436,10 +488,6 @@ namespace TelloQuest
             return promptText;
         }
 
-        /// <summary>Resolves the button identifier the same way TelloInitGate does
-        /// (icon glyph if available, bare button name otherwise) via the shared
-        /// method on TelloInitGate - avoids duplicating the icon font + 8 glyph
-        /// fields on this screen too.</summary>
         private void SetFooterPrompt(TextMeshProUGUI target, TelloUiKit.GamepadBrand brand, string position)
         {
             if (initGate != null)
@@ -465,67 +513,61 @@ namespace TelloQuest
             }
         }
 
-        /// <summary>Viewport (clipped) + Content (scrolled) + a thin scroll-position
-        /// indicator on the right edge.</summary>
-        private void BuildScrollArea(Transform parent)
-        {
-            var viewportGO = new GameObject("Viewport", typeof(RectTransform), typeof(RectMask2D));
-            viewportGO.transform.SetParent(parent, false);
-            viewportRect = viewportGO.GetComponent<RectTransform>();
-            viewportRect.sizeDelta = new Vector2(ContentWidth + 20f, ViewportHeight);
-            viewportRect.anchoredPosition = new Vector2(-10f, 335f - ViewportHeight * 0.5f);
-
-            var contentGO = new GameObject("Content", typeof(RectTransform));
-            contentGO.transform.SetParent(viewportRect, false);
-            contentRect = contentGO.GetComponent<RectTransform>();
-            contentRect.pivot = new Vector2(0.5f, 1f);
-            contentRect.anchorMin = new Vector2(0.5f, 1f);
-            contentRect.anchorMax = new Vector2(0.5f, 1f);
-            contentRect.sizeDelta = new Vector2(ContentWidth, 10f); // height finalized once all rows are built
-            contentRect.anchoredPosition = Vector2.zero;
-
-            // Scroll-position indicator ("ascenseur") - a thin track the full height
-            // of the viewport, with a shorter thumb sized/positioned proportionally
-            // to how much of Content is currently visible. Purely visual (there's no
-            // pointer input in this world-space gamepad-driven canvas to drag it
-            // with) - driven directly from UpdateScroll() each frame instead.
-            var trackGO = new GameObject("ScrollTrack", typeof(RectTransform), typeof(Image));
-            trackGO.transform.SetParent(parent, false);
-            RectTransform trackRect = trackGO.GetComponent<RectTransform>();
-            trackRect.sizeDelta = new Vector2(4f, ViewportHeight);
-            trackRect.anchoredPosition = new Vector2(340f, 335f - ViewportHeight * 0.5f);
-            Image trackImage = trackGO.GetComponent<Image>();
-            trackImage.color = PanelEdge;
-
-            var thumbGO = new GameObject("ScrollThumb", typeof(RectTransform), typeof(Image));
-            thumbGO.transform.SetParent(trackRect, false);
-            RectTransform thumbRect = thumbGO.GetComponent<RectTransform>();
-            thumbRect.pivot = new Vector2(0.5f, 1f);
-            thumbRect.anchorMin = new Vector2(0.5f, 1f);
-            thumbRect.anchorMax = new Vector2(0.5f, 1f);
-            scrollThumb = thumbGO.GetComponent<Image>();
-            scrollThumb.color = Amber;
-        }
 
         // =================================================================
-        // ROWS - all ~32 parameters, grouped by theme
+        // PAGES ET LIGNES
         // =================================================================
+        private PageData buildingPage;
         private float cursorY;
 
-        private void BuildAllRows()
+        private PageData BuildPage(SettingsPage page, string subtitle)
         {
+            var rootGO = new GameObject($"Page_{page}", typeof(RectTransform));
+            rootGO.transform.SetParent(viewportRect, false);
+            RectTransform rootRect = rootGO.GetComponent<RectTransform>();
+            rootRect.pivot = new Vector2(0.5f, 1f);
+            rootRect.anchorMin = new Vector2(0.5f, 1f);
+            rootRect.anchorMax = new Vector2(0.5f, 1f);
+            rootRect.sizeDelta = new Vector2(ContentWidth, 10f);
+            rootRect.anchoredPosition = Vector2.zero;
+
+            var data = new PageData { page = page, subtitle = subtitle, root = rootGO, contentRect = rootRect };
+
+            buildingPage = data;
             cursorY = 0f;
 
-            AddSection("Display");
+            if (page == SettingsPage.Video) BuildVideoRows();
+            else BuildGeneralRows();
+
+            data.contentHeight = -cursorY + BottomPadding;
+            rootRect.sizeDelta = new Vector2(ContentWidth, data.contentHeight);
+            buildingPage = null;
+            return data;
+        }
+
+        // -----------------------------------------------------------------
+        // PAGE VIDEO - tout ce qui influe sur l'image
+        // -----------------------------------------------------------------
+        private void BuildVideoRows()
+        {
+            AddSection("Screen placement");
             AddFloatRow("Screen distance", 0.6f, 10f, 1.2f, "{0:F2}m",
                 () => videoScreen != null ? videoScreen.DistanceFromCamera : 1.2f,
                 v => { if (videoScreen != null) videoScreen.DistanceFromCamera = v; });
             AddFloatRow("Screen size", 0.5f, 10f, 1f, "{0:F2}x",
                 () => videoScreen != null ? videoScreen.SizeMultiplier : 1f,
                 v => videoScreen?.SetSizeMultiplier(v));
+            AddFloatRow("Vertical offset", -1f, 1f, -0.3f, "{0:F2}m",
+                () => videoScreen != null ? videoScreen.VerticalOffset : -0.3f,
+                v => { if (videoScreen != null) videoScreen.VerticalOffset = v; });
+            AddFloatRow("Eye height", 1.2f, 2f, 1.6f, "{0:F2}m",
+                () => videoScreen != null ? videoScreen.AssumedEyeHeightMeters : 1.6f,
+                v => { if (videoScreen != null) videoScreen.AssumedEyeHeightMeters = v; });
             AddFloatRow("Transparency", 0.15f, 1f, 1f, "{0:P0}",
                 () => videoScreen != null ? videoScreen.Opacity : 1f,
                 v => videoScreen?.SetOpacity(v));
+
+            AddSection("Colour");
             AddFloatRow("White balance", -1f, 1f, 0f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.WhiteBalanceShift : 0f,
                 v => videoScreen?.SetWhiteBalanceShift(v));
@@ -535,51 +577,101 @@ namespace TelloQuest
             AddFloatRow("Contrast", 0.5f, 2f, 1f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.Contrast : 1f,
                 v => videoScreen?.SetContrast(v));
-            AddFloatRow("Night mode strength", 0f, 1f, 0.35f, "{0:P0}",
-                () => videoScreen != null ? videoScreen.NightModeStrength : 0.35f,
-                v => videoScreen?.SetNightModeStrength(v));
-            AddFloatRow("Sharpening strength", 0f, 1.5f, 0.4f, "{0:F2}",
-                () => videoScreen != null ? videoScreen.SharpenStrength : 0.4f,
-                v => videoScreen?.SetSharpenStrength(v));
-            AddFloatRow("Vertical offset", -1f, 1f, -0.3f, "{0:F2}m",
-                () => videoScreen != null ? videoScreen.VerticalOffset : -0.3f,
-                v => { if (videoScreen != null) videoScreen.VerticalOffset = v; });
-            AddFloatRow("Eye height", 1.2f, 2.0f, 1.6f, "{0:F2}m",
-                () => videoScreen != null ? videoScreen.AssumedEyeHeightMeters : 1.6f,
-                v => { if (videoScreen != null) videoScreen.AssumedEyeHeightMeters = v; });
-            if (videoScreen != null) saveActions.Add(videoScreen.SavePersistedSettings);
+            // Le SPS du Tello ne porte pas de VUI : la matrice est donc devinee. Ce
+            // switch permet de trancher a l'oeil, sur de la vegetation ou des carnations.
+            AddBoolRow("Force BT.709 matrix", false,
+                () => videoScreen != null && videoScreen.ForceBt709,
+                v => videoScreen?.SetForceBt709(v));
+            // A n'activer que si l'image parait trop contrastee/sombre : signifie que
+            // les plans Y/UV subissent une conversion sRGB parasite au sampling.
+            AddBoolRow("Undo sRGB plane sampling", false,
+                () => videoScreen != null && videoScreen.PlanesSampledAsSRGB,
+                v => videoScreen?.SetPlanesSampledAsSRGB(v));
+            AddFloatRow("Chroma site offset", -1f, 1f, 0.5f, "{0:F2}px",
+                () => videoScreen != null ? videoScreen.ChromaSiteOffset : 0.5f,
+                v => videoScreen?.SetChromaSiteOffset(v));
 
-            AddSection("Safety");
-            AddFloatRow("Battery low threshold", 5f, 40f, 20f, "{0:F0}%",
+            AddSection("Sharpness & noise");
+            AddBoolRow("Bicubic upscale", true,
+                () => videoScreen == null || videoScreen.BicubicUpscale,
+                v => videoScreen?.SetBicubicUpscale(v));
+            AddFloatRow("Smoothing", 0f, 1f, 0f, "{0:P0}",
+                () => videoScreen != null ? videoScreen.SmoothStrength : 0f,
+                v => videoScreen?.SetSmoothStrength(v));
+            AddFloatRow("Smoothing edge threshold", 0.01f, 0.5f, 0.08f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.SmoothEdgeThreshold : 0.08f,
+                v => videoScreen?.SetSmoothEdgeThreshold(v));
+            AddFloatRow("Sharpening", 0f, 1.5f, 0f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.SharpenStrength : 0f,
+                v => videoScreen?.SetSharpenStrength(v));
+
+            AddSection("Night mode");
+            AddFloatRow("Night mode strength", 0f, 1f, 0f, "{0:P0}",
+                () => videoScreen != null ? videoScreen.NightModeStrength : 0f,
+                v => videoScreen?.SetNightModeStrength(v));
+            AddFloatRow("Night mode threshold", 0.5f, 4f, 2f, "{0:F2}",
+                () => videoScreen != null ? videoScreen.NightModeThreshold : 2f,
+                v => videoScreen?.SetNightModeThreshold(v));
+            AddFloatRow("Night mode blur", 0f, 1f, 0f, "{0:P0}",
+                () => videoScreen != null ? videoScreen.NightModeBlurStrength : 0f,
+                v => videoScreen?.SetNightModeBlurStrength(v));
+            if (videoScreen != null) buildingPage.saveActions.Add(videoScreen.SavePersistedSettings);
+
+            AddSection("Decoding");
+            AddFloatRow("Signal meter nominal FPS", 10f, 60f, 25f, "{0:F0}fps",
+                () => statusPanel != null ? statusPanel.NominalFps : 25f,
+                v => { if (statusPanel != null) statusPanel.NominalFps = v; });
+            if (statusPanel != null) buildingPage.saveActions.Add(statusPanel.SavePersistedSettings);
+
+            AddFloatRow("Decoder restart timeout", 0f, 10f, 3f, "{0:F1}s",
+                () => videoDecoder != null ? videoDecoder.DecoderStallTimeoutSeconds : 3f,
+                v => { if (videoDecoder != null) videoDecoder.DecoderStallTimeoutSeconds = v; });
+        }
+
+        // -----------------------------------------------------------------
+        // PAGE GENERALE - tout le reste, classe par theme
+        // -----------------------------------------------------------------
+        private void BuildGeneralRows()
+        {
+            AddSection("Battery");
+            AddFloatRow("Low battery warning", 5f, 40f, 20f, "{0:F0}%",
                 () => tello != null ? tello.BatteryLowThreshold : 20f,
                 v => { if (tello != null) tello.BatteryLowThreshold = Mathf.RoundToInt(v); });
-            AddFloatRow("Battery critical threshold", 5f, 25f, 10f, "{0:F0}%",
+            AddFloatRow("Critical battery", 5f, 25f, 10f, "{0:F0}%",
                 () => tello != null ? tello.BatteryCriticalThreshold : 10f,
                 v => { if (tello != null) tello.BatteryCriticalThreshold = Mathf.RoundToInt(v); });
+            AddBoolRow("Auto-land on critical battery", true,
+                () => tello == null || tello.AutoLandOnCriticalBattery,
+                v => { if (tello != null) tello.AutoLandOnCriticalBattery = v; });
+
+            AddSection("Temperature");
             AddFloatRow("Temperature warning", 50f, 100f, 80f, "{0:F0}\u00B0C",
                 () => tello != null ? tello.TemperatureWarningThreshold : 80f,
                 v => { if (tello != null) tello.TemperatureWarningThreshold = v; });
             AddFloatRow("Temperature critical", 60f, 110f, 90f, "{0:F0}\u00B0C",
                 () => tello != null ? tello.TemperatureCriticalThreshold : 90f,
                 v => { if (tello != null) tello.TemperatureCriticalThreshold = v; });
+
+            AddSection("Proximity");
             AddFloatRow("Proximity warning", 10f, 200f, 50f, "{0:F0}cm",
                 () => tello != null ? tello.ProximityWarningCm : 50f,
                 v => { if (tello != null) tello.ProximityWarningCm = Mathf.RoundToInt(v); });
             AddFloatRow("Proximity critical", 5f, 100f, 20f, "{0:F0}cm",
                 () => tello != null ? tello.ProximityCriticalCm : 20f,
                 v => { if (tello != null) tello.ProximityCriticalCm = Mathf.RoundToInt(v); });
-            AddBoolRow("Auto-land on critical battery", true,
-                () => tello == null || tello.AutoLandOnCriticalBattery,
-                v => { if (tello != null) tello.AutoLandOnCriticalBattery = v; });
+
+            AddSection("Altitude ceiling");
             AddBoolRow("Altitude ceiling", false,
                 () => tello != null && tello.EnableAltitudeCeiling,
                 v => { if (tello != null) tello.EnableAltitudeCeiling = v; });
             AddFloatRow("Max height", 50f, 1000f, 300f, "{0:F0}cm",
                 () => tello != null ? tello.MaxHeightCm : 300f,
                 v => { if (tello != null) tello.MaxHeightCm = v; });
-            AddFloatRow("Altitude soft margin", 10f, 200f, 50f, "{0:F0}cm",
+            AddFloatRow("Soft margin", 10f, 200f, 50f, "{0:F0}cm",
                 () => tello != null ? tello.AltitudeCeilingSoftMarginCm : 50f,
                 v => { if (tello != null) tello.AltitudeCeilingSoftMarginCm = v; });
+
+            AddSection("Crash detection");
             AddBoolRow("Crash detection", true,
                 () => tello == null || tello.EnableCrashDetection,
                 v => { if (tello != null) tello.EnableCrashDetection = v; });
@@ -589,19 +681,21 @@ namespace TelloQuest
             AddBoolRow("Auto-land if crash suspected", false,
                 () => tello != null && tello.AutoLandOnCrashSuspected,
                 v => { if (tello != null) tello.AutoLandOnCrashSuspected = v; });
-            AddBoolRow("Position estimation (dead reckoning)", true,
+
+            AddSection("Navigation & logging");
+            AddBoolRow("Position estimation", true,
                 () => tello == null || tello.EnableDeadReckoning,
                 v => { if (tello != null) tello.EnableDeadReckoning = v; });
             AddBoolRow("Flight log (CSV)", false,
                 () => tello != null && tello.EnableFlightLog,
                 v => { if (tello != null) tello.EnableFlightLog = v; });
-            if (tello != null) saveActions.Add(tello.SavePersistedSettings);
+            if (tello != null) buildingPage.saveActions.Add(tello.SavePersistedSettings);
 
             AddSection("Gamepad");
             AddFloatRow("Loss timeout (safety hover)", 0.1f, 3f, 0.5f, "{0:F1}s",
                 () => gamepadController != null ? gamepadController.GamepadTimeoutSeconds : 0.5f,
                 v => { if (gamepadController != null) gamepadController.GamepadTimeoutSeconds = v; });
-            AddBoolRow("Auto-calibrate sticks on connect", true,
+            AddBoolRow("Auto-calibrate on connect", true,
                 () => gamepadController == null || gamepadController.AutoCalibrateOnConnect,
                 v => { if (gamepadController != null) gamepadController.AutoCalibrateOnConnect = v; });
             AddFloatRow("Auto-calibrate delay", 0f, 2f, 0.3f, "{0:F1}s",
@@ -616,49 +710,109 @@ namespace TelloQuest
             AddFloatRow("Haptic strength", 0f, 1f, 0.6f, "{0:P0}",
                 () => gamepadController != null ? gamepadController.WarningHapticStrength : 0.6f,
                 v => { if (gamepadController != null) gamepadController.WarningHapticStrength = v; });
-            if (gamepadController != null) saveActions.Add(gamepadController.SavePersistedSettings);
+            if (gamepadController != null) buildingPage.saveActions.Add(gamepadController.SavePersistedSettings);
 
-            AddSection("Panels");
-            AddFloatRow("Side panels gap", 0f, 0.1f, 0.01f, "{0:F2}m",
+            AddSection("Cockpit layout");
+            AddFloatRow("Side panels gap", 0f, 0.1f, 0.01f, "{0:F3}m",
                 () => spatialPanel != null ? spatialPanel.Gap : 0.01f,
-                v => { if (spatialPanel != null) spatialPanel.Gap = v; });
-            if (spatialPanel != null) saveActions.Add(spatialPanel.SavePersistedSettings);
+                v => { if (spatialPanel != null) spatialPanel.Gap = v; if (actionLogPanel != null) actionLogPanel.Gap = v; });
+            AddFloatRow("Cockpit angle", 0f, 60f, 20f, "{0:F0}\u00B0",
+                () => spatialPanel != null ? spatialPanel.CockpitAngleDegrees : 20f,
+                v => { if (spatialPanel != null) spatialPanel.CockpitAngleDegrees = v; if (actionLogPanel != null) actionLogPanel.CockpitAngleDegrees = v; });
+            AddBoolRow("Pin panels to screen depth", true,
+                () => spatialPanel == null || spatialPanel.PinInnerEdgeToScreenDepth,
+                v => { if (spatialPanel != null) spatialPanel.PinInnerEdgeToScreenDepth = v; if (actionLogPanel != null) actionLogPanel.PinInnerEdgeToScreenDepth = v; });
+            AddFloatRow("Panels depth offset", -0.3f, 0.3f, 0f, "{0:F3}m",
+                () => spatialPanel != null ? spatialPanel.PanelDepthOffset : 0f,
+                v => { if (spatialPanel != null) spatialPanel.PanelDepthOffset = v; if (actionLogPanel != null) actionLogPanel.PanelDepthOffset = v; });
 
-            AddFloatRow("Video signal nominal FPS", 10f, 30f, 25f, "{0:F0}fps",
-                () => statusPanel != null ? statusPanel.NominalFps : 25f,
-                v => { if (statusPanel != null) statusPanel.NominalFps = v; });
-            if (statusPanel != null) saveActions.Add(statusPanel.SavePersistedSettings);
-
-            // BottomPadding leaves genuine slack under the last row, so scrolling all
-            // the way down never leaves it sitting flush against - or clipped by -
-            // the viewport's bottom edge.
-            contentHeight = -cursorY + BottomPadding;
-            contentRect.sizeDelta = new Vector2(ContentWidth, contentHeight);
+            AddSection("Instrument graphs");
+            AddFloatRow("Graph window", 30f, 300f, 60f, "{0:F0}s",
+                () => spatialPanel != null ? spatialPanel.GraphWindowSeconds : 60f,
+                v => { if (spatialPanel != null) spatialPanel.GraphWindowSeconds = v; });
+            AddFloatRow("Graph sample interval", 0.5f, 5f, 1f, "{0:F1}s",
+                () => spatialPanel != null ? spatialPanel.GraphSampleIntervalSeconds : 1f,
+                v => { if (spatialPanel != null) spatialPanel.GraphSampleIntervalSeconds = v; });
+            if (spatialPanel != null) buildingPage.saveActions.Add(spatialPanel.SavePersistedSettings);
+            if (actionLogPanel != null) buildingPage.saveActions.Add(actionLogPanel.SavePersistedSettings);
         }
 
+        private void BuildScrollArea(Transform parent)
+        {
+            var viewportGO = new GameObject("Viewport", typeof(RectTransform), typeof(RectMask2D));
+            viewportGO.transform.SetParent(parent, false);
+            viewportRect = viewportGO.GetComponent<RectTransform>();
+            viewportRect.sizeDelta = new Vector2(ContentWidth + 20f, ViewportHeight);
+            viewportRect.anchoredPosition = new Vector2(-10f, 335f - ViewportHeight * 0.5f);
+
+            var trackGO = new GameObject("ScrollTrack", typeof(RectTransform), typeof(Image));
+            trackGO.transform.SetParent(parent, false);
+            RectTransform trackRect = trackGO.GetComponent<RectTransform>();
+            trackRect.sizeDelta = new Vector2(4f, ViewportHeight);
+            trackRect.anchoredPosition = new Vector2(340f, 335f - ViewportHeight * 0.5f);
+            trackGO.GetComponent<Image>().color = PanelEdge;
+
+            var thumbGO = new GameObject("ScrollThumb", typeof(RectTransform), typeof(Image));
+            thumbGO.transform.SetParent(trackRect, false);
+            RectTransform thumbRect = thumbGO.GetComponent<RectTransform>();
+            thumbRect.pivot = new Vector2(0.5f, 1f);
+            thumbRect.anchorMin = new Vector2(0.5f, 1f);
+            thumbRect.anchorMax = new Vector2(0.5f, 1f);
+            scrollThumb = thumbGO.GetComponent<Image>();
+            scrollThumb.color = Amber;
+        }
+
+        // =================================================================
+        // WIDGETS DE LIGNE
+        //
+        // Les curseurs ne sont plus une "bulle" arrondie remplie de jaune : chaque
+        // ligne numerique porte maintenant une VRAIE echelle - un rail sombre, onze
+        // graduations (les reperes 0 / 50 / 100 % etant plus hauts), une portion
+        // remplie jusqu'a la valeur courante, et une poignee franche posee dessus,
+        // detachee du fond par un lisere sombre pour rester lisible quelle que soit
+        // la position. Les booleens ont leur propre widget : un interrupteur a
+        // bascule dont le bouton glisse d'un cote a l'autre, plutot qu'une jauge
+        // remplie a 0 % ou 100 % qui ne se lisait pas comme un interrupteur.
+        // La ligne selectionnee recoit en plus un fond ambre tres discret, pour
+        // qu'on sache toujours ou l'on est sans avoir a chercher.
+        // =================================================================
         private void AddSection(string title)
         {
             var go = new GameObject($"Section_{title}", typeof(RectTransform));
-            go.transform.SetParent(contentRect, false);
+            go.transform.SetParent(buildingPage.contentRect, false);
             RectTransform r = go.GetComponent<RectTransform>();
             r.pivot = new Vector2(0.5f, 1f);
             r.anchorMin = new Vector2(0.5f, 1f);
             r.anchorMax = new Vector2(0.5f, 1f);
             r.sizeDelta = new Vector2(ContentWidth, SectionHeaderHeight);
             r.anchoredPosition = new Vector2(0f, cursorY);
-            var t = go.AddComponent<TextMeshProUGUI>();
+
+            var labelGO = new GameObject("Text", typeof(RectTransform));
+            labelGO.transform.SetParent(r, false);
+            RectTransform labelRect = labelGO.GetComponent<RectTransform>();
+            labelRect.sizeDelta = new Vector2(ContentWidth, 22f);
+            labelRect.anchoredPosition = new Vector2(0f, -16f);
+            var t = labelGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(t, monoFont);
             t.fontSize = 13f;
             t.color = Amber;
             t.alignment = TextAlignmentOptions.MidlineLeft;
+            t.characterSpacing = 6f;
             t.text = title.ToUpperInvariant();
+
+            var lineGO = new GameObject("Rule", typeof(RectTransform), typeof(Image));
+            lineGO.transform.SetParent(r, false);
+            RectTransform lineRect = lineGO.GetComponent<RectTransform>();
+            lineRect.sizeDelta = new Vector2(ContentWidth, 1f);
+            lineRect.anchoredPosition = new Vector2(0f, -33f);
+            lineGO.GetComponent<Image>().color = PanelEdge;
 
             cursorY -= SectionHeaderHeight;
         }
 
         private void AddFloatRow(string label, float min, float max, float defaultValue, string format, Func<float> getter, Action<float> setter)
         {
-            SettingsRow row = BuildRowVisual(label);
+            SettingsRow row = BuildRowVisual(label, RowKind.Float);
             row.kind = RowKind.Float;
             row.min = min;
             row.max = max;
@@ -666,25 +820,25 @@ namespace TelloQuest
             row.format = format;
             row.getFloat = getter;
             row.setFloat = setter;
-            rows.Add(row);
+            buildingPage.rows.Add(row);
             cursorY -= RowHeight;
         }
 
         private void AddBoolRow(string label, bool defaultValue, Func<bool> getter, Action<bool> setter)
         {
-            SettingsRow row = BuildRowVisual(label);
+            SettingsRow row = BuildRowVisual(label, RowKind.Bool);
             row.kind = RowKind.Bool;
             row.defaultBool = defaultValue;
             row.getBool = getter;
             row.setBool = setter;
-            rows.Add(row);
+            buildingPage.rows.Add(row);
             cursorY -= RowHeight;
         }
 
-        private SettingsRow BuildRowVisual(string label)
+        private SettingsRow BuildRowVisual(string label, RowKind kind)
         {
             var rowGO = new GameObject($"Row_{label}", typeof(RectTransform));
-            rowGO.transform.SetParent(contentRect, false);
+            rowGO.transform.SetParent(buildingPage.contentRect, false);
             RectTransform rowRect = rowGO.GetComponent<RectTransform>();
             rowRect.pivot = new Vector2(0.5f, 1f);
             rowRect.anchorMin = new Vector2(0.5f, 1f);
@@ -692,11 +846,22 @@ namespace TelloQuest
             rowRect.sizeDelta = new Vector2(ContentWidth, RowHeight);
             rowRect.anchoredPosition = new Vector2(0f, cursorY);
 
+            // Cree en premier : reste donc derriere tout le reste de la ligne.
+            var bgGO = new GameObject("SelectionBg", typeof(RectTransform), typeof(Image));
+            bgGO.transform.SetParent(rowRect, false);
+            RectTransform bgRect = bgGO.GetComponent<RectTransform>();
+            bgRect.sizeDelta = new Vector2(ContentWidth, RowHeight - 4f);
+            bgRect.anchoredPosition = new Vector2(0f, -RowHeight * 0.5f);
+            Image bgImage = bgGO.GetComponent<Image>();
+            bgImage.sprite = roundedSprite;
+            bgImage.type = Image.Type.Sliced;
+            bgImage.color = RowClearBg;
+
             var labelGO = new GameObject("Label", typeof(RectTransform));
             labelGO.transform.SetParent(rowRect, false);
             RectTransform labelRect = labelGO.GetComponent<RectTransform>();
-            labelRect.sizeDelta = new Vector2(280f, 40f);
-            labelRect.anchoredPosition = new Vector2(-190f, -RowHeight * 0.5f);
+            labelRect.sizeDelta = new Vector2(LabelWidth, 24f);
+            labelRect.anchoredPosition = new Vector2(LabelX, -18f);
             var labelText = labelGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(labelText, bodyFont);
             labelText.fontSize = 14f;
@@ -706,72 +871,173 @@ namespace TelloQuest
             labelText.overflowMode = TextOverflowModes.Ellipsis;
             labelText.text = label;
 
-            var trackGO = new GameObject("Track", typeof(RectTransform), typeof(Image));
-            trackGO.transform.SetParent(rowRect, false);
-            RectTransform trackRect = trackGO.GetComponent<RectTransform>();
-            trackRect.sizeDelta = new Vector2(160f, 12f);
-            trackRect.anchoredPosition = new Vector2(40f, -RowHeight * 0.5f);
-            Image trackImage = trackGO.GetComponent<Image>();
-            trackImage.sprite = circleSprite;
-            trackImage.type = Image.Type.Simple;
-            trackImage.color = TrackBg;
-
-            var fillGO = new GameObject("Fill", typeof(RectTransform), typeof(Image));
-            fillGO.transform.SetParent(trackRect, false);
-            RectTransform fillRect = fillGO.GetComponent<RectTransform>();
-            fillRect.pivot = new Vector2(0f, 0.5f);
-            fillRect.anchorMin = new Vector2(0f, 0f);
-            fillRect.anchorMax = new Vector2(0f, 1f);
-            fillRect.anchoredPosition = Vector2.zero;
-            fillRect.sizeDelta = new Vector2(0f, 0f);
-            Image fillImage = fillGO.GetComponent<Image>();
-            fillImage.sprite = circleSprite;
-            fillImage.type = Image.Type.Simple;
-            fillImage.color = Amber;
-
             var valueGO = new GameObject("Value", typeof(RectTransform));
             valueGO.transform.SetParent(rowRect, false);
             RectTransform valueRect = valueGO.GetComponent<RectTransform>();
-            valueRect.sizeDelta = new Vector2(80f, 40f);
-            valueRect.anchoredPosition = new Vector2(220f, -RowHeight * 0.5f);
+            valueRect.sizeDelta = new Vector2(100f, 26f);
+            valueRect.anchoredPosition = new Vector2(ValueX, -18f);
             var valueText = valueGO.AddComponent<TextMeshProUGUI>();
             ApplyFont(valueText, monoFont);
-            valueText.fontSize = 13f;
+            valueText.fontSize = 14f;
             valueText.color = Ink;
             valueText.alignment = TextAlignmentOptions.MidlineRight;
 
-            return new SettingsRow
+            var row = new SettingsRow
             {
+                selectionBg = bgImage,
                 labelText = labelText,
-                fillImage = fillImage,
-                trackRect = trackRect,
                 valueText = valueText,
                 rowY = cursorY
             };
+
+            if (kind == RowKind.Float) BuildSlider(rowRect, row);
+            else BuildSwitch(rowRect, row);
+
+            return row;
+        }
+
+        /// <summary>Rail + graduations + remplissage + poignee.</summary>
+        private void BuildSlider(RectTransform rowRect, SettingsRow row)
+        {
+            var sliderGO = new GameObject("Slider", typeof(RectTransform));
+            sliderGO.transform.SetParent(rowRect, false);
+            RectTransform sliderRect = sliderGO.GetComponent<RectTransform>();
+            sliderRect.sizeDelta = new Vector2(RailWidth, 30f);
+            sliderRect.anchoredPosition = new Vector2(SliderCentreX, ControlY);
+            row.sliderRoot = sliderGO;
+
+            float half = RailWidth * 0.5f;
+
+            // Graduations, SOUS le rail pour rester visibles meme quand la poignee
+            // passe dessus. Reperes plus hauts au debut, au milieu et a la fin.
+            for (int i = 0; i < TickCount; i++)
+            {
+                bool major = i == 0 || i == TickCount / 2 || i == TickCount - 1;
+                var tickGO = new GameObject($"Tick{i}", typeof(RectTransform), typeof(Image));
+                tickGO.transform.SetParent(sliderRect, false);
+                RectTransform tickRect = tickGO.GetComponent<RectTransform>();
+                tickRect.sizeDelta = new Vector2(major ? 2f : 1f, major ? 11f : 7f);
+                tickRect.anchoredPosition = new Vector2(-half + i * (RailWidth / (TickCount - 1)), major ? -14f : -12f);
+                tickGO.GetComponent<Image>().color = major ? PanelEdge : TickColor;
+            }
+
+            var railGO = new GameObject("Rail", typeof(RectTransform), typeof(Image));
+            railGO.transform.SetParent(sliderRect, false);
+            RectTransform railRect = railGO.GetComponent<RectTransform>();
+            railRect.sizeDelta = new Vector2(RailWidth, RailHeight);
+            railRect.anchoredPosition = Vector2.zero;
+            Image railImage = railGO.GetComponent<Image>();
+            railImage.sprite = circleSprite;
+            railImage.type = Image.Type.Simple;
+            railImage.color = TrackBg;
+
+            var fillGO = new GameObject("Fill", typeof(RectTransform), typeof(Image));
+            fillGO.transform.SetParent(sliderRect, false);
+            row.fillRect = fillGO.GetComponent<RectTransform>();
+            row.fillRect.pivot = new Vector2(0f, 0.5f);
+            row.fillRect.sizeDelta = new Vector2(0f, RailHeight);
+            row.fillRect.anchoredPosition = new Vector2(-half, 0f);
+            row.fillImage = fillGO.GetComponent<Image>();
+            row.fillImage.sprite = circleSprite;
+            row.fillImage.type = Image.Type.Simple;
+            row.fillImage.color = AmberDeep;
+
+            // Lisere sombre derriere la poignee : sans lui, une poignee claire posee
+            // sur une portion remplie claire devient impossible a localiser.
+            var haloGO = new GameObject("HandleEdge", typeof(RectTransform), typeof(Image));
+            haloGO.transform.SetParent(sliderRect, false);
+            RectTransform haloRect = haloGO.GetComponent<RectTransform>();
+            haloRect.sizeDelta = new Vector2(18f, 24f);
+            haloRect.anchoredPosition = Vector2.zero;
+            Image haloImage = haloGO.GetComponent<Image>();
+            haloImage.sprite = handleSprite;
+            haloImage.type = Image.Type.Sliced;
+            haloImage.color = PanelBg;
+
+            var handleGO = new GameObject("Handle", typeof(RectTransform), typeof(Image));
+            handleGO.transform.SetParent(sliderRect, false);
+            row.handleRect = handleGO.GetComponent<RectTransform>();
+            row.handleRect.sizeDelta = new Vector2(14f, 20f);
+            row.handleRect.anchoredPosition = Vector2.zero;
+            row.handleImage = handleGO.GetComponent<Image>();
+            row.handleImage.sprite = handleSprite;
+            row.handleImage.type = Image.Type.Sliced;
+            row.handleImage.color = InkDim;
+
+            // Le lisere doit suivre la poignee : on le stocke comme enfant logique en
+            // le repositionnant depuis RefreshRows via handleRect (voir plus bas).
+            row.handleRect.SetAsLastSibling();
+            haloRect.SetSiblingIndex(row.handleRect.GetSiblingIndex());
+            row.handleEdge = haloRect;
+        }
+
+        /// <summary>Interrupteur a bascule : piste en pilule + bouton qui glisse.</summary>
+        private void BuildSwitch(RectTransform rowRect, SettingsRow row)
+        {
+            var switchGO = new GameObject("Switch", typeof(RectTransform));
+            switchGO.transform.SetParent(rowRect, false);
+            RectTransform switchRect = switchGO.GetComponent<RectTransform>();
+            switchRect.sizeDelta = new Vector2(56f, 26f);
+            switchRect.anchoredPosition = new Vector2(SliderCentreX - RailWidth * 0.5f + 28f, ControlY);
+            row.switchRoot = switchGO;
+
+            var trackGO = new GameObject("Track", typeof(RectTransform), typeof(Image));
+            trackGO.transform.SetParent(switchRect, false);
+            RectTransform trackRect = trackGO.GetComponent<RectTransform>();
+            trackRect.sizeDelta = new Vector2(56f, 26f);
+            trackRect.anchoredPosition = Vector2.zero;
+            row.switchTrack = trackGO.GetComponent<Image>();
+            row.switchTrack.sprite = circleSprite;
+            row.switchTrack.type = Image.Type.Simple;
+            row.switchTrack.color = SwitchOffTrack;
+
+            var knobGO = new GameObject("Knob", typeof(RectTransform), typeof(Image));
+            knobGO.transform.SetParent(switchRect, false);
+            row.switchKnob = knobGO.GetComponent<RectTransform>();
+            row.switchKnob.sizeDelta = new Vector2(20f, 20f);
+            row.switchKnob.anchoredPosition = new Vector2(-14f, 0f);
+            row.switchKnobImage = knobGO.GetComponent<Image>();
+            row.switchKnobImage.sprite = circleSprite;
+            row.switchKnobImage.type = Image.Type.Simple;
+            row.switchKnobImage.color = InkDim;
         }
 
         // =================================================================
-        // LIVE UPDATE
+        // RAFRAICHISSEMENT
         // =================================================================
         private void RefreshRows()
         {
+            var rows = activePage.rows;
             for (int i = 0; i < rows.Count; i++)
             {
                 SettingsRow row = rows[i];
-                bool selected = i == selectedRow;
-                row.labelText.color = selected ? Amber : InkDim;
+                bool selected = i == activePage.selectedRow;
+
+                row.selectionBg.color = selected ? RowSelectedBg : RowClearBg;
+                row.labelText.color = selected ? Ink : InkDim;
                 row.labelText.fontStyle = selected ? FontStyles.Bold : FontStyles.Normal;
+                row.valueText.color = selected ? Amber : Ink;
 
                 if (row.kind == RowKind.Float)
                 {
                     float normalized = row.max > row.min ? Mathf.InverseLerp(row.min, row.max, row.floatValue) : 0f;
-                    row.fillImage.rectTransform.sizeDelta = new Vector2(row.trackRect.sizeDelta.x * normalized, 0f);
-                    row.fillImage.enabled = true;
+                    float half = RailWidth * 0.5f;
+                    float handleX = -half + normalized * RailWidth;
+
+                    row.fillRect.sizeDelta = new Vector2(normalized * RailWidth, RailHeight);
+                    row.fillImage.color = selected ? Amber : AmberDeep;
+
+                    row.handleRect.anchoredPosition = new Vector2(handleX, 0f);
+                    row.handleEdge.anchoredPosition = new Vector2(handleX, 0f);
+                    row.handleImage.color = selected ? Amber : Ink;
+
                     row.valueText.text = string.Format(row.format, row.floatValue);
                 }
                 else
                 {
-                    row.fillImage.rectTransform.sizeDelta = new Vector2(row.boolValue ? row.trackRect.sizeDelta.x : 0f, 0f);
+                    row.switchKnob.anchoredPosition = new Vector2(row.boolValue ? 14f : -14f, 0f);
+                    row.switchTrack.color = row.boolValue ? (selected ? Amber : AmberDeep) : SwitchOffTrack;
+                    row.switchKnobImage.color = row.boolValue ? PanelBg : InkDim;
                     row.valueText.text = row.boolValue ? "ON" : "OFF";
                 }
             }

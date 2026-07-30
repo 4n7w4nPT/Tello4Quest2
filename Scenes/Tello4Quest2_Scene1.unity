@@ -178,6 +178,10 @@ MonoBehaviour:
   windDriftMaxCommandedInput: 10
   trailSampleDistanceCm: 18
   maxTrailPoints: 500
+  logRcCommands: 0
+  sendStreamQualityCommands: 0
+  videoBitrateMbps: 5
+  requestHighResolutionAndFps: 0
   autoRetryIntervalSeconds: 2
 --- !u!4 &122290290
 Transform:
@@ -333,7 +337,7 @@ MonoBehaviour:
   decoder: {fileID: 1275375340}
   vrCamera: {fileID: 578774530}
   rgbaMaterial: {fileID: 2100000, guid: e59144486ee06664db0ad8e89077957b, type: 2}
-  yuvMaterial: {fileID: 2100000, guid: 55a3e60916736de4782ff9a779795fa9, type: 2}
+  yuvMaterial: {fileID: 2100000, guid: 9eb3db1fcd459f1488793a5a961b8a71, type: 2}
   distanceFromCamera: 1.5
   verticalOffset: -0.3
   quadWidth: 2
@@ -351,7 +355,14 @@ MonoBehaviour:
   brightness: 0
   contrast: 1
   nightModeStrength: 0.35
-  sharpenStrength: 0.4
+  sharpenStrength: 0.3
+  nightModeBlurStrength: 0
+  smoothStrength: 0.5
+  smoothEdgeThreshold: 0.08
+  chromaSiteOffset: 0.5
+  bicubicUpscale: 1
+  planesSampledAsSRGB: 0
+  forceBt709: 0
   useTestTexture: 0
   customTestTexture: {fileID: 0}
   assumedEyeHeightMeters: 1.6
@@ -590,9 +601,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Oculus.VR::OVRManager
   _monoscopic: 0
-  _sharpenType: 0
+  _sharpenType: 65536
   _disableRecording: 0
-  _enableDynamicResolution: 1
+  _enableDynamicResolution: 0
   minDynamicResolutionScale: 1
   maxDynamicResolutionScale: 1
   quest2MinDynamicResolutionScale: 0.7
@@ -651,7 +662,7 @@ MonoBehaviour:
   requestRecordAudioPermissionOnStartup: 0
   requestPassthroughCameraAccessPermissionOnStartup: 0
   _localDimming: 1
-  _trackingOriginType: 0
+  _trackingOriginType: 1
   usePositionTracking: 1
   useRotationTracking: 1
   useIPDInPositionTracking: 1
@@ -731,6 +742,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::TelloQuest.TelloVideoDecoder
   videoReceiver: {fileID: 1275375341}
   threadedDecoding: 1
+  decoderStallTimeoutSeconds: 3
+  verboseDiagnostics: 0
 --- !u!114 &1275375341
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -746,8 +759,11 @@ MonoBehaviour:
   tello: {fileID: 122290289}
   videoPort: 11111
   telloPacketSize: 1460
+  receiveBufferBytes: 4194304
   maxFrameSizeBytes: 2097152
   maxQueuedFrames: 3
+  validateAccessUnits: 1
+  verboseDiagnostics: 0
 --- !u!4 &1275375342
 Transform:
   m_ObjectHideFlags: 0
@@ -776,7 +792,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TelloQuest.TelloVideoRecorder
   videoReceiver: {fileID: 1275375341}
-  videoDecoder: {fileID: 0}
+  videoDecoder: {fileID: 1275375340}
   videoWidthPx: 960
   videoHeightPx: 720
   videoSaveFolderName: TelloRecordings
@@ -819,6 +835,7 @@ MonoBehaviour:
   sampleIntervalSeconds: 1
   initialWindowSeconds: 120
   windowSmoothing: 3
+  maxSamplesPerGraph: 180
   fpsGraphMax: 30
 --- !u!4 &1531549296
 Transform:
@@ -902,6 +919,7 @@ MonoBehaviour:
   onPhotoSaved:
     m_PersistentCalls:
       m_Calls: []
+  verboseDiagnostics: 0
 --- !u!4 &1643372462
 Transform:
   m_ObjectHideFlags: 0
@@ -967,7 +985,6 @@ MonoBehaviour:
   verticalOffset: -0.3
   worldWidth: 2.2
   cornerRadiusPx: 20
-  telloSsidPrefix: TELLO-
   displayFont: {fileID: 11400000, guid: 23a60abf9dc3e594db8f8c89dd9e540e, type: 2}
   bodyFont: {fileID: 11400000, guid: 752968831af0a8044b8e6e10aa2aec25, type: 2}
   monoFont: {fileID: 11400000, guid: c0e45f70d32291a439984d50683cd1ad, type: 2}

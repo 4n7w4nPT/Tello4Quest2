@@ -1,183 +1,363 @@
 Shader "TelloQuest/YuvNV12ToRGB"
 {
-    // Converts the 2-plane YUV output some hardware decoders (including the
-    // Quest's) return - a greyscale Y (luma) plane plus an interleaved U/V
-    // (chroma) plane, aka NV12 - into RGB for display. PopH264 hands back
-    // this layout instead of RGBA on platforms where the OS decoder doesn't
-    // do that conversion itself; see TelloVideoDecoder.cs. This is the path
-    // actually used on Quest hardware, confirmed via our own decode
-    // diagnostics - the enhancements below only apply here, not to the
-    // RGBA fallback material (TelloVideoRGBA.mat), which uses Unity's
-    // built-in Unlit shader and can't be edited the same way.
+    // NV12 (plan Y greyscale + plan UV entrelace) -> RGB, pour le chemin que
+    // PopH264 emprunte reellement sur Quest (voir TelloVideoDecoder).
     //
-    // _Opacity (added for the Settings screen's transparency slider) blends
-    // the video against whatever's behind it - passthrough, in this app's
-    // case - so the shader runs in the Transparent queue with standard alpha
-    // blending rather than Opaque. At _Opacity = 1 this looks identical to a
-    // fully opaque video screen.
+    // ------------------------------------------------------------------
+    // CE QUI A CHANGE PAR RAPPORT A LA VERSION PRECEDENTE - a lire avant
+    // de toucher a quoi que ce soit ici :
     //
-    // Image quality pass: automatic "night mode" and sharpening, both driven
-    // per-pixel from the luma value already being sampled - no separate
-    // frame-average/luminance-analysis pass (which would need a compute
-    // shader and a readback) is needed for either effect:
-    //   - Night mode: darker pixels get lifted toward white, self-limiting
-    //     (the boost fades out as a pixel gets brighter, so well-lit footage
-    //     is untouched) - approximates "the app noticed this scene is dark"
-    //     without actually needing a whole-frame average.
-    //   - The same brightness lift also amplifies sensor noise, which is
-    //     exactly why a small drone camera looks grainy in low light in the
-    //     first place - so a soft blur blends in proportionally to how much
-    //     night-mode boost was applied, using the same four neighbor samples
-    //     already fetched for the effect below.
-    //   - Sharpening (unsharp mask): counters the softness H.264 compression
-    //     already carries, most visible in daylight footage where night
-    //     mode isn't doing anything. Chosen over a bicubic upscale filter -
-    //     bicubic would improve the upscale interpolation curve, but doesn't
-    //     address compression softness at all, which is the more noticeable
-    //     issue on this specific feed; a sharpen pass is also meaningfully
-    //     simpler to get right than a correct bicubic kernel, worth
-    //     preferring given there's no way to visually preview shader changes
-    //     before a real headset test.
-    //   - Both effects only touch luma (Y) - chroma is left alone, since
-    //     sharpening or blurring color information tends to cause fringing
-    //     rather than a visible quality improvement.
+    // 1. EXPANSION DU CHROMA. L'ancienne version etendait le Y du limited
+    //    range (16-235) mais laissait le chroma brut, tout en utilisant les
+    //    coefficients FULL range (1.402 / 0.344136 / 0.714136 / 1.772).
+    //    Les deux conventions etaient melangees : resultat, toute la
+    //    saturation etait sous-evaluee d'un facteur 255/224 = 1.1384, soit
+    //    ~12% de couleur en moins. C'est ce qui donnait le rendu "fade".
+    //    Corrige ci-dessous : le chroma est etendu explicitement, et les
+    //    coefficients full-range redeviennent alors corrects.
     //
-    // _WhiteBalanceShift: manual, user-controlled correction for a color cast
-    // coming from the Tello's own camera/sensor (cheap CMOS sensors commonly
-    // skew warm/yellow under indoor lighting) - deliberately NOT automatic.
-    // An automatic "gray world" correction was considered, but doing it
-    // properly needs a real frame-average estimate (impossible to get from a
-    // single pixel in isolation the way the brightness/sharpen effects above
-    // do), and getting it wrong risks overcorrecting a scene that's
-    // genuinely warm-toned rather than actually mis-balanced - with no way
-    // to visually verify the result before a real headset test, a manual
-    // slider the pilot can see and adjust live is the safer choice. Defaults
-    // to 0 (neutral, byte-for-byte the same output as before this existed).
+    // 2. GAMMA. Le projet est en Color Space = Linear. Le RGB issu d'une
+    //    conversion YUV est encode en gamma (courbe BT.601/709). Le rendre
+    //    tel quel faisait ré-encoder une seconde fois en sRGB par le
+    //    hardware -> noirs remontes, image laiteuse. On convertit donc
+    //    explicitement en lineaire avant de sortir.
+    //
+    // 3. STEREO. L'ancienne version n'avait aucun boilerplate d'instancing
+    //    stereo. En Single Pass Instanced (le defaut d'OpenXR), les deux
+    //    yeux recevaient la projection de l'oeil gauche. Corrige.
+    //
+    // 4. CROP. MediaCodec aligne ses plans (stride / sliceHeight), donc la
+    //    texture peut etre plus grande que l'image utile. _CropScale est
+    //    calcule par TelloVideoDecoder a partir de la resolution reelle
+    //    lue dans le SPS, et pilote par TelloVideoDisplay.
+    //
+    // 5. UPSCALE BICUBIQUE (Catmull-Rom) optionnel, sur le luma. Un
+    //    unsharp mask applique par-dessus une interpolation bilineaire
+    //    amplifie les artefacts de la bilineaire ; l'ordre correct est
+    //    bicubique PUIS sharpen.
+    //
+    // 6. MOTS-CLES. Les 4 taps voisins du sharpen / night mode ne sont plus
+    //    payes quand ces effets sont a zero (ils l'etaient en permanence,
+    //    y compris avec les valeurs par defaut).
+    // ------------------------------------------------------------------
+
     Properties
     {
-        _YTex ("Y Plane (luma)", 2D) = "black" {}
+        _YTex  ("Y Plane (luma)",   2D) = "black" {}
         _UVTex ("UV Plane (chroma)", 2D) = "grey" {}
+
+        // x,y = fraction visible de la texture (image utile / taille texture).
+        // (1,1) = aucun padding. Ecrit par TelloVideoDisplay.
+        _CropScale ("Crop scale (xy)", Vector) = (1,1,0,0)
+
         [Toggle] _SwapUV ("Swap U/V channels", Float) = 0
-        [Toggle] _FlipU ("Flip horizontally", Float) = 0
-        [Toggle] _FlipV ("Flip vertically", Float) = 0
+        [Toggle] _FlipU  ("Flip horizontally", Float) = 0
+        [Toggle] _FlipV  ("Flip vertically",   Float) = 1
+
         _Opacity ("Opacity", Range(0,1)) = 1
 
-        [Header(Sharpening)]
-        _SharpenStrength ("Sharpen Strength", Range(0, 1.5)) = 0.4
+        [Header(Colour conversion)]
+        [Toggle(_BT709_ON)]     _BT709     ("Use BT.709 (sinon BT.601)", Float) = 0
+        [Toggle(_FULLRANGE_ON)] _FullRange ("Source en full range (sinon limited)", Float) = 0
+        [Toggle(_PLANES_SRGB_ON)] _PlanesSRGB ("Plans echantillonnes en sRGB (voir doc)", Float) = 0
 
-        [Header(Automatic Night Mode)]
-        _NightModeThreshold ("Night Mode Threshold (higher = kicks in on brighter footage)", Range(0.5, 4)) = 2.0
-        _NightModeStrength ("Night Mode Max Brightness Lift", Range(0, 1)) = 0.35
-        _NightModeBlurStrength ("Night Mode Max Blur Blend", Range(0, 1)) = 0.6
+        [Header(Upscale)]
+        [Toggle(_BICUBIC_ON)] _Bicubic ("Upscale bicubique (Catmull-Rom)", Float) = 1
 
-        [Header(Manual White Balance)]
-        _WhiteBalanceShift ("White Balance Shift (negative = cooler/blue, positive = warmer/yellow)", Range(-1, 1)) = 0
+        [Header(Chroma)]
+        // Siting chroma 4:2:0 "left" (convention MPEG-2 / H.264 par defaut) : le
+        // centre d'un texel chroma se trouve un demi-texel luma a droite de la
+        // position qu'il represente. Sans correction, on obtient un franges de
+        // couleur d'un demi-pixel sur les contours verticaux contrastes.
+        _ChromaSiteOffset ("Chroma site offset (en texels luma)", Range(-1, 1)) = 0.5
+
+        [Header(Enhancement)]
+        [Toggle(_ENHANCE_ON)] _Enhance ("Activer lissage sharpen et night mode", Float) = 0
+        _SmoothStrength ("Lissage a preservation de contours", Range(0, 1)) = 0
+        _SmoothEdgeThreshold ("Seuil de contour du lissage (bas = preserve plus)", Range(0.01, 0.5)) = 0.08
+        _SharpenStrength ("Sharpen Strength", Range(0, 1.5)) = 0
+        _NightModeThreshold ("Night Mode Threshold", Range(0.5, 4)) = 2.0
+        _NightModeStrength ("Night Mode Max Brightness Lift", Range(0, 1)) = 0
+        _NightModeBlurStrength ("Night Mode Max Blur Blend", Range(0, 1)) = 0
+
+        [Header(Manual grade)]
+        _WhiteBalanceShift ("White Balance Shift", Range(-1, 1)) = 0
+        _Brightness ("Brightness", Range(-1, 1)) = 0
+        _Contrast ("Contrast", Range(0.5, 2)) = 1
+
+        // Pilotes depuis TelloVideoDisplay pour basculer opaque <-> transparent
+        // sans changer de materiau. A opacite 1 on repasse en opaque : sur le
+        // GPU tuile du Quest, le blending permanent coute de la bande passante
+        // pour rien et interdit l'early-Z.
+        [HideInInspector] _SrcBlend ("", Float) = 1
+        [HideInInspector] _DstBlend ("", Float) = 0
+        [HideInInspector] _ZWrite   ("", Float) = 1
     }
+
     SubShader
     {
-        Tags { "RenderType"="Transparent" "RenderPipeline"="UniversalPipeline" "Queue"="Transparent" }
-        Cull Off
-        Blend SrcAlpha OneMinusSrcAlpha
-        ZWrite Off
+        Tags { "RenderType"="Transparent" "RenderPipeline"="UniversalPipeline" "Queue"="Transparent" "IgnoreProjector"="True" }
 
         Pass
         {
             Name "Unlit"
             Tags { "LightMode" = "UniversalForward" }
 
+            Cull Off
+            Blend [_SrcBlend] [_DstBlend]
+            ZWrite [_ZWrite]
+            ZTest LEqual
+
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
+            #pragma target 3.5
+
+            // Indispensable sur Quest : sans ca, en Single Pass Instanced les
+            // deux yeux rendent la matrice de l'oeil gauche.
+            #pragma multi_compile_instancing
+
+            #pragma multi_compile_local _ _BT709_ON
+            #pragma multi_compile_local _ _FULLRANGE_ON
+            #pragma multi_compile_local _ _PLANES_SRGB_ON
+            #pragma multi_compile_local _ _BICUBIC_ON
+            #pragma multi_compile_local _ _ENHANCE_ON
+
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
 
             struct Attributes
             {
                 float4 positionOS : POSITION;
-                float2 uv : TEXCOORD0;
+                float2 uv         : TEXCOORD0;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
-                float2 uv : TEXCOORD0;
+                float2 uv          : TEXCOORD0;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+                UNITY_VERTEX_OUTPUT_STEREO
             };
 
-            TEXTURE2D(_YTex);
-            SAMPLER(sampler_YTex);
-            float4 _YTex_TexelSize; // Unity auto-provides this for any texture named _YTex: (1/width, 1/height, width, height)
-            TEXTURE2D(_UVTex);
-            SAMPLER(sampler_UVTex);
-            float _SwapUV;
-            float _FlipU;
-            float _FlipV;
-            float _Opacity;
-            float _SharpenStrength;
-            float _NightModeThreshold;
-            float _NightModeStrength;
-            float _NightModeBlurStrength;
-            float _WhiteBalanceShift;
+            TEXTURE2D(_YTex);   SAMPLER(sampler_YTex);
+            TEXTURE2D(_UVTex);  SAMPLER(sampler_UVTex);
+
+            CBUFFER_START(UnityPerMaterial)
+                float4 _YTex_TexelSize;   // (1/w, 1/h, w, h)
+                float4 _CropScale;
+                float  _SwapUV;
+                float  _FlipU;
+                float  _FlipV;
+                float  _Opacity;
+                float  _ChromaSiteOffset;
+                float  _SmoothStrength;
+                float  _SmoothEdgeThreshold;
+                float  _SharpenStrength;
+                float  _NightModeThreshold;
+                float  _NightModeStrength;
+                float  _NightModeBlurStrength;
+                float  _WhiteBalanceShift;
+                float  _Brightness;
+                float  _Contrast;
+                float  _SrcBlend;
+                float  _DstBlend;
+                float  _ZWrite;
+            CBUFFER_END
 
             Varyings vert(Attributes IN)
             {
                 Varyings OUT;
+                UNITY_SETUP_INSTANCE_ID(IN);
+                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
+
                 OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
+
                 float2 uv = IN.uv;
                 if (_FlipU > 0.5) uv.x = 1.0 - uv.x;
                 if (_FlipV > 0.5) uv.y = 1.0 - uv.y;
-                OUT.uv = uv;
+
+                // Le crop se fait ici, en vertex : les plans sont eventuellement
+                // plus grands que l'image utile (alignement MediaCodec), donc on
+                // ne parcourt que la fraction reellement decodee.
+                OUT.uv = uv * _CropScale.xy;
                 return OUT;
+            }
+
+            // ---------------------------------------------------------------
+            // Echantillonnage du luma
+            // ---------------------------------------------------------------
+            float SampleY(float2 uv)
+            {
+                float y = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, uv).r;
+                #ifdef _PLANES_SRGB_ON
+                    // Unity a applique une conversion sRGB->lineaire au sampling
+                    // parce que la Texture2D n'a pas ete creee en "linear".
+                    // On l'annule : Y n'est pas une couleur sRGB.
+                    y = LinearToSRGB(y.xxx).r;
+                #endif
+                return y;
+            }
+
+            // Catmull-Rom en 4 taps bilineaires par axe (16 taps logiques -> 9
+            // acces texture reels ne sont pas necessaires ici : on reste sur la
+            // version separable classique, largement assez rapide a cette
+            // resolution sur Adreno).
+            float4 CatmullRomWeights(float t)
+            {
+                float t2 = t * t;
+                float t3 = t2 * t;
+                return 0.5 * float4(
+                    -t3 + 2.0 * t2 - t,
+                     3.0 * t3 - 5.0 * t2 + 2.0,
+                    -3.0 * t3 + 4.0 * t2 + t,
+                     t3 - t2);
+            }
+
+            float SampleYBicubic(float2 uv)
+            {
+                float2 texSize  = _YTex_TexelSize.zw;
+                float2 texel    = _YTex_TexelSize.xy;
+                float2 coord    = uv * texSize - 0.5;
+                float2 fxy      = frac(coord);
+                float2 base     = (coord - fxy + 0.5) * texel;
+
+                float4 wx = CatmullRomWeights(fxy.x);
+                float4 wy = CatmullRomWeights(fxy.y);
+
+                float result = 0.0;
+                [unroll]
+                for (int j = 0; j < 4; j++)
+                {
+                    float rowY = base.y + (float(j) - 1.0) * texel.y;
+                    float row = 0.0;
+                    [unroll]
+                    for (int i = 0; i < 4; i++)
+                    {
+                        float2 s = float2(base.x + (float(i) - 1.0) * texel.x, rowY);
+                        row += SampleY(s) * wx[i];
+                    }
+                    result += row * wy[j];
+                }
+                return result;
             }
 
             half4 frag(Varyings IN) : SV_Target
             {
-                float2 texel = _YTex_TexelSize.xy;
-                float yC = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, IN.uv).r;
-                float yL = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, IN.uv - float2(texel.x, 0)).r;
-                float yR = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, IN.uv + float2(texel.x, 0)).r;
-                float yU = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, IN.uv - float2(0, texel.y)).r;
-                float yD = SAMPLE_TEXTURE2D(_YTex, sampler_YTex, IN.uv + float2(0, texel.y)).r;
-                float yBlurred = (yC * 4.0 + yL + yR + yU + yD) / 8.0; // soft, center-weighted box blur
+                UNITY_SETUP_INSTANCE_ID(IN);
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
-                // Night mode boost: 0 for well-lit pixels, ramping up as luma drops.
-                // Squared so the falloff is gentle near the threshold rather than a
-                // hard edge - well-lit footage stays completely untouched.
-                float nightBoost = saturate(1.0 - yC * _NightModeThreshold);
-                nightBoost *= nightBoost;
+                float2 uv = IN.uv;
 
-                // Sharpen when there's little/no night-mode boost (i.e. well-lit
-                // footage), fade toward the soft blur instead as the boost ramps up -
-                // the same four neighbor taps serve both, just recombined differently.
-                float sharpenedY = yC + (yC - yBlurred) * _SharpenStrength;
-                float finalY = lerp(sharpenedY, yBlurred, nightBoost * _NightModeBlurStrength);
+                #ifdef _BICUBIC_ON
+                    float yC = SampleYBicubic(uv);
+                #else
+                    float yC = SampleY(uv);
+                #endif
 
-                // Shadow lift - self-limiting since nightBoost is already ~0 for
-                // bright pixels, so this has no effect on well-lit footage.
-                finalY = saturate(finalY + nightBoost * _NightModeStrength * (1.0 - finalY));
+                float finalY = yC;
 
-                float2 uvSample = SAMPLE_TEXTURE2D(_UVTex, sampler_UVTex, IN.uv).rg;
+                #ifdef _ENHANCE_ON
+                {
+                    // Les memes 4 taps voisins servent au lissage, au sharpen ET au
+                    // night mode : aucun acces texture supplementaire pour le lissage.
+                    float2 texel = _YTex_TexelSize.xy;
+                    float yL = SampleY(uv - float2(texel.x, 0));
+                    float yR = SampleY(uv + float2(texel.x, 0));
+                    float yU = SampleY(uv - float2(0, texel.y));
+                    float yD = SampleY(uv + float2(0, texel.y));
+
+                    // --- 1. Lissage a preservation de contours ---
+                    // Chaque voisin est pondere par sa PROXIMITE en luminance au
+                    // centre. Dans une zone plate (bruit de compression, blocking),
+                    // les 4 voisins comptent plein pot et la zone se lisse ; sur un
+                    // contour, le voisin de l'autre cote du contour est presque
+                    // annule, donc le contour reste net. C'est ce qui permet de
+                    // gagner en douceur SANS perdre d'information, contrairement a
+                    // un flou uniforme.
+                    float k = rcp(max(_SmoothEdgeThreshold, 1e-4));
+                    k = k * k;
+                    float wL = rcp(1.0 + k * (yC - yL) * (yC - yL));
+                    float wR = rcp(1.0 + k * (yC - yR) * (yC - yR));
+                    float wU = rcp(1.0 + k * (yC - yU) * (yC - yU));
+                    float wD = rcp(1.0 + k * (yC - yD) * (yC - yD));
+                    float wSum = 1.0 + wL + wR + wU + wD;
+                    float ySmooth = (yC + yL * wL + yR * wR + yU * wU + yD * wD) / wSum;
+
+                    float yBase = lerp(yC, ySmooth, _SmoothStrength);
+
+                    // --- 2. Sharpen (unsharp mask), APRES le lissage ---
+                    // L'ordre compte : debruiter puis reaccentuer redonne du piquant
+                    // a la structure reelle, alors que l'inverse accentuerait d'abord
+                    // le bruit avant d'essayer de l'effacer.
+                    float yBlurred = (yC * 4.0 + yL + yR + yU + yD) / 8.0;
+                    float sharpenedY = yBase + (yBase - yBlurred) * _SharpenStrength;
+
+                    // --- 3. Night mode ---
+                    float nightBoost = saturate(1.0 - yC * _NightModeThreshold);
+                    nightBoost *= nightBoost;
+                    finalY = lerp(sharpenedY, yBlurred, nightBoost * _NightModeBlurStrength);
+                    finalY = saturate(finalY + nightBoost * _NightModeStrength * (1.0 - finalY));
+                }
+                #endif
+
+                // Decalage de siting chroma (voir _ChromaSiteOffset) : un demi-texel
+                // luma vers la gauche remet le chroma en face du luma qu'il decrit.
+                float2 uvChroma = float2(uv.x - _ChromaSiteOffset * _YTex_TexelSize.x, uv.y);
+                float2 uvSample = SAMPLE_TEXTURE2D(_UVTex, sampler_UVTex, uvChroma).rg;
+                #ifdef _PLANES_SRGB_ON
+                    uvSample = LinearToSRGB(float3(uvSample, 0)).rg;
+                #endif
+
                 float u = (_SwapUV > 0.5) ? uvSample.g : uvSample.r;
                 float v = (_SwapUV > 0.5) ? uvSample.r : uvSample.g;
 
-                // BT.601 limited-range YUV -> RGB (standard for H.264 video sources)
-                float yy = (finalY - 16.0 / 255.0) * (255.0 / 219.0);
-                u -= 0.5;
-                v -= 0.5;
+                // --- Expansion de plage ---
+                // Limited range : Y sur 16-235, UV sur 16-240. Les deux doivent
+                // etre etendus, pas seulement Y (c'etait LE bug de couleur).
+                float yy;
+                #ifdef _FULLRANGE_ON
+                    yy = finalY;
+                    u -= 0.5;
+                    v -= 0.5;
+                #else
+                    yy = (finalY - 16.0 / 255.0) * (255.0 / 219.0);
+                    u  = (u - 0.5) * (255.0 / 224.0);
+                    v  = (v - 0.5) * (255.0 / 224.0);
+                #endif
 
-                float r = yy + 1.402 * v;
-                float g = yy - 0.344136 * u - 0.714136 * v;
-                float b = yy + 1.772 * u;
+                // --- Matrice ---
+                float r, g, b;
+                #ifdef _BT709_ON
+                    r = yy + 1.5748 * v;
+                    g = yy - 0.187324 * u - 0.468124 * v;
+                    b = yy + 1.8556 * u;
+                #else
+                    r = yy + 1.402 * v;
+                    g = yy - 0.344136 * u - 0.714136 * v;
+                    b = yy + 1.772 * u;
+                #endif
 
-                // Manual white balance: shifts red up/blue down for "warmer"
-                // (positive), or the reverse for "cooler" (negative) - green is
-                // left alone, matching how a real color-temperature control
-                // works. Small fixed range (+/-0.15 at the slider's extremes) so
-                // it corrects a cast without being able to wash out the image.
                 r = saturate(r + _WhiteBalanceShift * 0.15);
                 b = saturate(b - _WhiteBalanceShift * 0.15);
 
-                return half4(r, saturate(g), b, _Opacity);
+                float3 rgb = saturate(float3(r, saturate(g), b) + _Brightness * 0.3);
+                rgb = saturate((rgb - 0.5) * _Contrast + 0.5);
+
+                // --- Gamma ---
+                // rgb est encode en gamma (courbe video). Le projet est en Linear,
+                // donc on convertit avant de sortir, sinon le hardware ré-encode
+                // une seconde fois en sRGB (image laiteuse, noirs remontes).
+                // Si un jour le projet repassait en Gamma color space, il faudrait
+                // retirer cette ligne.
+                rgb = SRGBToLinear(rgb);
+
+                return half4(rgb, _Opacity);
             }
             ENDHLSL
         }
     }
+    Fallback Off
 }

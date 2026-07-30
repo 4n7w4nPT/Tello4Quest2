@@ -61,6 +61,22 @@ namespace TelloQuest
         private float recordingStartRealtime;
         private long lastPresentationTimeUs = -1;
         private int androidKeyFrameFlag = -1; // MediaCodec.BUFFER_FLAG_KEY_FRAME, fetched once and cached
+
+        // Objets JNI mis en cache. AVANT, HandleFrameReady creait a CHAQUE frame un
+        // AndroidJavaClass("java.nio.ByteBuffer") et un AndroidJavaObject BufferInfo,
+        // et ByteBuffer.wrap() recopiait tout le tableau managé côté Java. A 30 fps
+        // c'etait une tempete d'allocations JNI qui bloquait le main thread - donc
+        // faisait deborder le buffer UDP - donc degradait la video EN DIRECT pendant
+        // l'enregistrement. Tout ce qui peut etre reutilise l'est desormais.
+        private AndroidJavaClass androidByteBufferClass;
+        private AndroidJavaObject androidBufferInfo;
+
+        // MediaMuxer refuse un fichier qui ne commence pas par une image cle : sans
+        // ce garde-fou, la premiere seconde du .mp4 etait une bouillie sur la plupart
+        // des lecteurs, parce qu'on ecrivait la premiere AU qui passait (souvent une
+        // P-frame).
+        private bool androidWaitingForKeyFrame;
+        private long androidFramesSkippedBeforeKeyFrame;
 #endif
 
         public bool IsRecording { get; private set; }
@@ -140,8 +156,15 @@ namespace TelloQuest
                 int mp4Format = muxerOutputFormatClass.GetStatic<int>("MUXER_OUTPUT_MPEG_4");
                 androidMuxer = new AndroidJavaObject("android.media.MediaMuxer", fileDescriptor, mp4Format);
 
+                // La resolution vient maintenant du SPS reellement decode, et ne
+                // retombe sur les champs de l'Inspector que si le parsing a echoue.
+                // Le Tello EDU en "setresolution high" sort du 1280x720, donc coder
+                // 960x720 en dur produisait un fichier aux dimensions fausses.
+                int widthPx = (videoDecoder != null && videoDecoder.VideoWidth > 0) ? videoDecoder.VideoWidth : videoWidthPx;
+                int heightPx = (videoDecoder != null && videoDecoder.VideoHeight > 0) ? videoDecoder.VideoHeight : videoHeightPx;
+
                 using var mediaFormatClass = new AndroidJavaClass("android.media.MediaFormat");
-                using var videoFormat = mediaFormatClass.CallStatic<AndroidJavaObject>("createVideoFormat", "video/avc", videoWidthPx, videoHeightPx);
+                using var videoFormat = mediaFormatClass.CallStatic<AndroidJavaObject>("createVideoFormat", "video/avc", widthPx, heightPx);
 
                 using var byteBufferClass = new AndroidJavaClass("java.nio.ByteBuffer");
                 using var spsBuffer = byteBufferClass.CallStatic<AndroidJavaObject>("wrap", NormalizeStartCode(videoDecoder.CapturedSps));
@@ -155,6 +178,13 @@ namespace TelloQuest
 
                 using var mediaCodecClass = new AndroidJavaClass("android.media.MediaCodec");
                 androidKeyFrameFlag = mediaCodecClass.GetStatic<int>("BUFFER_FLAG_KEY_FRAME");
+
+                // Crees une seule fois par enregistrement, reutilises a chaque frame.
+                androidByteBufferClass = new AndroidJavaClass("java.nio.ByteBuffer");
+                androidBufferInfo = new AndroidJavaObject("android.media.MediaCodec$BufferInfo");
+
+                androidWaitingForKeyFrame = true;
+                androidFramesSkippedBeforeKeyFrame = 0;
 
                 recordingStartRealtime = Time.realtimeSinceStartup;
                 lastPresentationTimeUs = -1;
@@ -217,8 +247,14 @@ namespace TelloQuest
             androidParcelFileDescriptor?.Dispose();
             androidParcelFileDescriptor = null;
 
+            androidByteBufferClass?.Dispose();
+            androidByteBufferClass = null;
+            androidBufferInfo?.Dispose();
+            androidBufferInfo = null;
+
             androidVideoTrackIndex = -1;
             androidMuxerStarted = false;
+            androidWaitingForKeyFrame = false;
         }
 
         /// <summary>MediaMuxer's docs require csd-0/csd-1 to start with the 4-byte
@@ -247,22 +283,38 @@ namespace TelloQuest
 #if UNITY_ANDROID && !UNITY_EDITOR
                 if (!androidMuxerStarted || androidVideoTrackIndex < 0) return;
 
+                bool isKeyFrame = ContainsNalType(annexBFrame, 5); // IDR
+
+                // On n'ecrit rien avant la premiere image cle : un mp4 qui commence
+                // sur une P-frame est illisible au debut.
+                if (androidWaitingForKeyFrame)
+                {
+                    if (!isKeyFrame)
+                    {
+                        androidFramesSkippedBeforeKeyFrame++;
+                        return;
+                    }
+                    androidWaitingForKeyFrame = false;
+                    // La base de temps demarre a la premiere image reellement ecrite,
+                    // pour que la piste commence a pts = 0 et non avec un decalage.
+                    recordingStartRealtime = Time.realtimeSinceStartup;
+                    lastPresentationTimeUs = -1;
+                    if (androidFramesSkippedBeforeKeyFrame > 0)
+                        Debug.Log($"[TelloVideoRecorder] Skipped {androidFramesSkippedBeforeKeyFrame} access unit(s) waiting for the first keyframe.");
+                }
+
                 long ptsUs = (long)((Time.realtimeSinceStartup - recordingStartRealtime) * 1_000_000.0);
                 if (ptsUs <= lastPresentationTimeUs) ptsUs = lastPresentationTimeUs + 1; // MediaMuxer requires strictly increasing timestamps
                 lastPresentationTimeUs = ptsUs;
 
-                bool isKeyFrame = ContainsNalType(annexBFrame, 5); // IDR
+                using var sampleBuffer = androidByteBufferClass.CallStatic<AndroidJavaObject>("wrap", annexBFrame);
 
-                using var byteBufferClass = new AndroidJavaClass("java.nio.ByteBuffer");
-                using var sampleBuffer = byteBufferClass.CallStatic<AndroidJavaObject>("wrap", annexBFrame);
+                androidBufferInfo.Set("offset", 0);
+                androidBufferInfo.Set("size", annexBFrame.Length);
+                androidBufferInfo.Set("presentationTimeUs", ptsUs);
+                androidBufferInfo.Set("flags", isKeyFrame ? androidKeyFrameFlag : 0);
 
-                using var bufferInfo = new AndroidJavaObject("android.media.MediaCodec$BufferInfo");
-                bufferInfo.Set("offset", 0);
-                bufferInfo.Set("size", annexBFrame.Length);
-                bufferInfo.Set("presentationTimeUs", ptsUs);
-                bufferInfo.Set("flags", isKeyFrame ? androidKeyFrameFlag : 0);
-
-                androidMuxer.Call("writeSampleData", androidVideoTrackIndex, sampleBuffer, bufferInfo);
+                androidMuxer.Call("writeSampleData", androidVideoTrackIndex, sampleBuffer, androidBufferInfo);
 #else
                 if (fileStream == null) return;
                 fileStream.Write(annexBFrame, 0, annexBFrame.Length);

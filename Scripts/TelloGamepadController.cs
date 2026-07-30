@@ -134,6 +134,7 @@ namespace TelloQuest
             PlayerPrefs.SetInt(PrefsHapticsOnKey, enableHaptics ? 1 : 0);
             PlayerPrefs.SetFloat(PrefsHapticsDurationKey, warningHapticDuration);
             PlayerPrefs.SetFloat(PrefsHapticsStrengthKey, warningHapticStrength);
+            PlayerPrefs.Save(); // manquait : sans ca les reglages ne survivaient pas toujours a la fermeture
         }
 
         private void Awake()
@@ -202,17 +203,25 @@ namespace TelloQuest
         // are doing over time instead of relying on the one-shot connect/lost logs,
         // which were entirely absent from the last two logs provided - worth
         // confirming directly whether Unity ever sees the pad as connected at all.
+        [Tooltip("Log l'etat du gamepad une fois par seconde. A laisser decoche en vol.")]
+        [SerializeField] private bool verboseDiagnostics = false;
         private float diagnosticLogTimer;
 
         private void Update()
         {
             Gamepad pad = TelloUiKit.GetActiveGamepad();
 
-            diagnosticLogTimer += Time.deltaTime;
-            if (diagnosticLogTimer >= 1f)
+            // Ce bloc loggait une ligne par SECONDE en permanence, avec deux acces
+            // natifs a displayName et une interpolation de chaine. Debug.Log part vers
+            // logcat sur Quest et coute cher. Passe derriere un flag, decoche par defaut.
+            if (verboseDiagnostics)
             {
-                diagnosticLogTimer = 0f;
-                Debug.Log($"[TelloGamepadController][DIAG] Gamepad.current={(Gamepad.current != null ? Gamepad.current.displayName : "null")} ActiveGamepad={(pad != null ? pad.displayName : "null")} wasGamepadConnected={wasGamepadConnected} IsGamepadConnected={IsGamepadConnected}");
+                diagnosticLogTimer += Time.deltaTime;
+                if (diagnosticLogTimer >= 1f)
+                {
+                    diagnosticLogTimer = 0f;
+                    Debug.Log($"[TelloGamepadController][DIAG] Gamepad.current={(Gamepad.current != null ? Gamepad.current.displayName : "null")} ActiveGamepad={(pad != null ? pad.displayName : "null")} wasGamepadConnected={wasGamepadConnected} IsGamepadConnected={IsGamepadConnected}");
+                }
             }
 
             if (pad == null)

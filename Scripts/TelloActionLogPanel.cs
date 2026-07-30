@@ -52,6 +52,10 @@ namespace TelloQuest
         [SerializeField] private float gap = 0.01f;
         [Tooltip("Rotation around the vertical axis, mirroring TelloSpatialPanel's cockpit angle on the left - same magnitude, opposite sign, so both panels angle toward the pilot symmetrically.")]
         [SerializeField] private float cockpitAngleDegrees = 20f;
+        [Tooltip("Fait pivoter le panneau autour de son BORD INTERNE (celui qui longe l'ecran video) au lieu de son centre, de sorte que ce bord reste exactement dans le plan de l'ecran. Sans ca, l'inclinaison cockpit envoie toute la moitie interne derriere l'ecran, qui la masque.")]
+        [SerializeField] private bool pinInnerEdgeToScreenDepth = true;
+        [Tooltip("Decalage de profondeur supplementaire du panneau entier, en Z local de l'ecran video. 0 laisse le bord interne pile dans le plan de l'ecran. Si un reglage non nul deplace le panneau du mauvais cote, inverse simplement le signe - la convention de Z depend de l'orientation du quad.")]
+        [SerializeField] private float panelDepthOffset = 0f;
         [SerializeField] private bool positionedExternally = false;
 
         [Tooltip("How many lines to keep, oldest dropped first once exceeded - sized to comfortably fit the log's quarter of the band (25% of height) without needing to truncate a line.")]
@@ -104,6 +108,7 @@ namespace TelloQuest
 
         private void Awake()
         {
+            LoadPersistedSettings();
             if (tello == null) tello = TelloConnection.Instance;
             roundedSprite = TelloUiKit.GetRoundedSprite(cardCornerRadiusPx);
             circleSprite = TelloUiKit.GetRoundedSprite(10000f); // deliberately huge - clamps to a circle inside GetRoundedSprite
@@ -175,6 +180,34 @@ namespace TelloQuest
         /// then angled toward the pilot - the mirror image of the left panel's
         /// angle (same magnitude, opposite sign, since this panel needs to turn the
         /// opposite way to still face the pilot from the other side).</summary>
+        // =================================================================
+        // RUNTIME-ADJUSTABLE SETTINGS (ecran de parametres)
+        // =================================================================
+        public float Gap { get => gap; set { gap = value; PositionRightOfScreen(); } }
+        public float CockpitAngleDegrees { get => cockpitAngleDegrees; set { cockpitAngleDegrees = value; PositionRightOfScreen(); } }
+        public bool PinInnerEdgeToScreenDepth { get => pinInnerEdgeToScreenDepth; set { pinInnerEdgeToScreenDepth = value; PositionRightOfScreen(); } }
+        public float PanelDepthOffset { get => panelDepthOffset; set { panelDepthOffset = value; PositionRightOfScreen(); } }
+
+        private const string PrefsPrefix = "TelloQuest_Settings_ActionLog_";
+
+        private void LoadPersistedSettings()
+        {
+            gap = PlayerPrefs.GetFloat(PrefsPrefix + "Gap", gap);
+            cockpitAngleDegrees = PlayerPrefs.GetFloat(PrefsPrefix + "CockpitAngle", cockpitAngleDegrees);
+            pinInnerEdgeToScreenDepth = PlayerPrefs.GetInt(PrefsPrefix + "PinInnerEdge", pinInnerEdgeToScreenDepth ? 1 : 0) == 1;
+            panelDepthOffset = PlayerPrefs.GetFloat(PrefsPrefix + "PanelDepth", panelDepthOffset);
+        }
+
+        /// <summary>Called by TelloSettingsScreen after writing new values via the properties above.</summary>
+        public void SavePersistedSettings()
+        {
+            PlayerPrefs.SetFloat(PrefsPrefix + "Gap", gap);
+            PlayerPrefs.SetFloat(PrefsPrefix + "CockpitAngle", cockpitAngleDegrees);
+            PlayerPrefs.SetInt(PrefsPrefix + "PinInnerEdge", pinInnerEdgeToScreenDepth ? 1 : 0);
+            PlayerPrefs.SetFloat(PrefsPrefix + "PanelDepth", panelDepthOffset);
+            PlayerPrefs.Save();
+        }
+
         private void PositionRightOfScreen()
         {
             if (videoScreen == null)
@@ -188,10 +221,19 @@ namespace TelloQuest
             float scale = videoScreen.QuadHeight / CanvasPixelHeight;
             transform.localScale = Vector3.one * scale;
 
-            float bandWorldWidth = CanvasPixelWidth * scale;
-            float x = videoScreen.QuadWidth * 0.5f + gap + bandWorldWidth * 0.5f;
-            transform.localPosition = new Vector3(x, 0f, 0f);
-            transform.localRotation = Quaternion.Euler(0f, cockpitAngleDegrees, 0f);
+            float halfBandWidth = CanvasPixelWidth * scale * 0.5f;
+            Quaternion rotation = Quaternion.Euler(0f, cockpitAngleDegrees, 0f);
+            transform.localRotation = rotation;
+
+            // Bord interne du panneau DROIT = son bord gauche, donc -halfBandWidth
+            // dans le repere local du panneau.
+            transform.localPosition = TelloUiKit.SolvePinnedPanelPosition(
+                rotation,
+                new Vector3(-halfBandWidth, 0f, 0f),
+                videoScreen.QuadWidth * 0.5f + gap,
+                halfBandWidth,
+                pinInnerEdgeToScreenDepth,
+                panelDepthOffset);
         }
 
         // =================================================================
@@ -258,6 +300,9 @@ namespace TelloQuest
         /// visually stitch itself into a route the way an explicit line between
         /// each pair of points does, especially once there are more than a
         /// handful of them.</summary>
+        private int lastTrailCount = -1;
+        private float lastDrawnPixelsPerCm = -1f;
+
         private void UpdateMiniMap()
         {
             if (miniMapContainer == null) return;
@@ -267,6 +312,22 @@ namespace TelloQuest
             miniMapPixelsPerCm = Mathf.Lerp(miniMapPixelsPerCm, targetPixelsPerCm, Time.deltaTime * miniMapZoomSmoothing);
 
             IReadOnlyList<Vector2> trail = tello.FlightTrail;
+
+            // L'icone du drone bouge en continu : elle, on la met a jour chaque frame.
+            droneIconTransform.anchoredPosition = tello.EstimatedPositionCm * miniMapPixelsPerCm;
+            droneIconTransform.localRotation = Quaternion.Euler(0f, 0f, -tello.Yaw);
+
+            // La TRACE, en revanche, ne change que quand un point est ajoute ou quand le
+            // zoom bouge encore. Avant, tous les points (jusqu'a 500) etaient
+            // repositionnes a chaque frame, ET chacun appelait SetAsLastSibling() - une
+            // reorganisation de hierarchie qui force un rebuild complet du canvas. 500
+            // rebuilds par frame etait de loin l'appel le plus couteux du projet.
+            // L'ordre de dessin est desormais fixe une fois pour toutes a la
+            // construction (les lignes sont creees avant les points).
+            bool zoomStillMoving = Mathf.Abs(miniMapPixelsPerCm - lastDrawnPixelsPerCm) > 0.0001f;
+            if (trail.Count == lastTrailCount && !zoomStillMoving) return;
+            lastTrailCount = trail.Count;
+            lastDrawnPixelsPerCm = miniMapPixelsPerCm;
 
             // Line segments: one between each consecutive pair of points, so
             // trail.Count points need trail.Count - 1 segments.
@@ -312,13 +373,11 @@ namespace TelloQuest
                 }
                 trailDotPool[i].enabled = true;
                 trailDotPool[i].rectTransform.anchoredPosition = trail[i] * miniMapPixelsPerCm;
-                trailDotPool[i].transform.SetAsLastSibling(); // stay drawn on top of the connecting lines
             }
             for (int i = trail.Count; i < trailDotPool.Count; i++) trailDotPool[i].enabled = false;
 
-            droneIconTransform.anchoredPosition = tello.EstimatedPositionCm * miniMapPixelsPerCm;
-            droneIconTransform.localRotation = Quaternion.Euler(0f, 0f, -tello.Yaw);
-            droneIconTransform.SetAsLastSibling(); // stay drawn on top of everything else
+            // Une seule fois par redessin de trace, et non une fois par point.
+            droneIconTransform.SetAsLastSibling();
         }
 
         private void AddEntry(string message, Color color)

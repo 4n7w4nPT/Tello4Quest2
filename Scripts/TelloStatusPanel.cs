@@ -77,7 +77,11 @@ namespace TelloQuest
         private const string PrefsPrefix = "TelloQuest_Settings_Status_";
 
         /// <summary>Called by TelloSettingsScreen after writing new values via the properties above, to persist them for next launch.</summary>
-        public void SavePersistedSettings() => PlayerPrefs.SetFloat(PrefsPrefix + "NominalFps", nominalFps);
+        public void SavePersistedSettings()
+        {
+            PlayerPrefs.SetFloat(PrefsPrefix + "NominalFps", nominalFps);
+            PlayerPrefs.Save(); // manquait : sans ca, rien n'est ecrit sur disque avant la fermeture de l'app
+        }
 
         private void Awake()
         {
@@ -274,13 +278,39 @@ namespace TelloQuest
         // =================================================================
         // LIVE UPDATE
         // =================================================================
+        // Etat precedent, pour n'ecrire dans l'UI que ce qui a reellement change.
+        //
+        // ANCIEN COMPORTEMENT : les 3 pastilles, les 5 barres de signal, le texte fps
+        // et la temperature etaient reecrits a CHAQUE frame. Ecrire dans Image.color
+        // marque le canvas comme sale, donc ce canvas world-space etait entierement
+        // reconstruit 72 fois par seconde pour afficher des valeurs identiques - la
+        // telemetrie arrive a ~10 Hz et le fps est mesure sur une fenetre d'1 s.
+        private static readonly Color NeutralGray = new Color(0.45f, 0.45f, 0.45f);
+        private static readonly Color AmberColor = new Color(0.91f, 0.64f, 0.24f);
+
+        private int lastSignalLevel = -1;
+        private int lastFpsShown = -1;
+        private int lastTemperatureShown = int.MinValue;
+        private Color lastTemperatureColor;
+        private bool? lastGamepadOk;
+        private bool? lastTelloOk;
+        private int lastCommandDotState = -1; // -1 inconnu, 0 gris, 1 ok, 2 fail
+
         private void Update()
         {
-            gamepadDot.color = (gamepadController != null && gamepadController.IsGamepadConnected)
-                ? ConnectedColor : DisconnectedColor;
+            bool gamepadOk = gamepadController != null && gamepadController.IsGamepadConnected;
+            if (lastGamepadOk != gamepadOk)
+            {
+                lastGamepadOk = gamepadOk;
+                gamepadDot.color = gamepadOk ? ConnectedColor : DisconnectedColor;
+            }
 
-            telloDot.color = (tello != null && tello.IsConnected)
-                ? ConnectedColor : DisconnectedColor;
+            bool telloOk = tello != null && tello.IsConnected;
+            if (lastTelloOk != telloOk)
+            {
+                lastTelloOk = telloOk;
+                telloDot.color = telloOk ? ConnectedColor : DisconnectedColor;
+            }
 
             windowTimer += Time.deltaTime;
             if (windowTimer >= 1f)
@@ -294,20 +324,45 @@ namespace TelloQuest
             bool signalLost = tello != null && tello.IsSignalLost;
             float ratio = signalLost ? 0f : Mathf.Clamp01(measuredFps / nominalFps);
             int level = signalLost ? 0 : Mathf.Clamp(Mathf.RoundToInt(ratio * SignalBarCount), 0, SignalBarCount);
-            for (int i = 0; i < signalBars.Count; i++)
-                signalBars[i].color = i < level ? BarOnColor : BarOffColor;
-            signalFpsText.text = $"{measuredFps:F0}fps";
-
-            lastCommandDot.color = lastCommandKnown
-                ? (lastCommandOk ? ConnectedColor : DisconnectedColor)
-                : new Color(0.45f, 0.45f, 0.45f); // neutral gray: no command answered yet
-
-            if (tello != null)
+            if (level != lastSignalLevel)
             {
-                temperatureValue.text = $"{tello.TemperatureHigh:F0}\u00B0C";
-                temperatureValue.color = tello.IsTemperatureCritical ? DisconnectedColor
-                    : tello.IsTemperatureWarning ? new Color(0.91f, 0.64f, 0.24f) // amber
-                    : Color.white;
+                lastSignalLevel = level;
+                for (int i = 0; i < signalBars.Count; i++)
+                    signalBars[i].color = i < level ? BarOnColor : BarOffColor;
+            }
+
+            int fpsShown = Mathf.RoundToInt(measuredFps);
+            if (fpsShown != lastFpsShown)
+            {
+                lastFpsShown = fpsShown;
+                signalFpsText.SetText("{0}fps", fpsShown);
+            }
+
+            int commandDotState = lastCommandKnown ? (lastCommandOk ? 1 : 2) : 0;
+            if (commandDotState != lastCommandDotState)
+            {
+                lastCommandDotState = commandDotState;
+                lastCommandDot.color = commandDotState == 0 ? NeutralGray
+                    : commandDotState == 1 ? ConnectedColor
+                    : DisconnectedColor;
+            }
+
+            if (tello == null) return;
+
+            int temperatureShown = Mathf.RoundToInt(tello.TemperatureHigh);
+            Color temperatureColor = tello.IsTemperatureCritical ? DisconnectedColor
+                : tello.IsTemperatureWarning ? AmberColor
+                : Color.white;
+
+            if (temperatureShown != lastTemperatureShown)
+            {
+                lastTemperatureShown = temperatureShown;
+                temperatureValue.SetText("{0}\u00B0C", temperatureShown);
+            }
+            if (temperatureColor != lastTemperatureColor)
+            {
+                lastTemperatureColor = temperatureColor;
+                temperatureValue.color = temperatureColor;
             }
         }
     }

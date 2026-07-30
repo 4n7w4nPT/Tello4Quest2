@@ -22,6 +22,19 @@ namespace TelloQuest
     /// 2. Create Assets/Materials/TelloVideoYUV.mat, shader
     ///    "TelloQuest/YuvNV12ToRGB" (already double-sided by the shader itself).
     /// 3. Assign both below.
+    ///
+    /// ATTENTION sur ces deux materiaux : les assets livres avaient tous les deux
+    /// ete obtenus en changeant le shader d'un materiau URP/Lit, et TelloVideoRGBA
+    /// etait en realite reste sur "Universal Render Pipeline/Lit" (verifie via son
+    /// GUID de shader) - donc le chemin de secours RGBA passait la video a travers
+    /// un shader PBR eclaire, affecte par la lumiere directionnelle et l'ambiante.
+    /// Ils trainent aussi tout le bagage d'un Lit (_Metallic, _BumpMap, lightmaps)
+    /// et, pour le YUV, des valeurs gravees par d'anciennes sessions de playmode
+    /// (_SharpenStrength=0.4, _NightModeStrength=0.35, alors que le shader les
+    /// declare a 0). A recreer proprement tous les deux.
+    ///
+    /// Ce composant ne modifie plus les assets : il en fait des copies runtime dans
+    /// Awake() (rgbaInstance / yuvInstance), donc plus aucune derive silencieuse.
     /// </summary>
     public class TelloVideoDisplay : MonoBehaviour
     {
@@ -55,10 +68,28 @@ namespace TelloQuest
         [SerializeField, Range(-1f, 1f)] private float brightness = 0f;
         [Tooltip("Manual contrast, scaled around the midpoint. 1 = neutral. YUV material only.")]
         [SerializeField, Range(0.5f, 2f)] private float contrast = 1f;
-        [Tooltip("How strongly automatic night mode brightens dark footage - turn this down if it's over-brightening in your conditions rather than fighting it with negative Brightness above. 0 disables the effect entirely. YUV material only.")]
-        [SerializeField, Range(0f, 1f)] private float nightModeStrength = 0.35f;
-        [Tooltip("How strongly the automatic sharpening pass counters H.264 softness. 0 disables it entirely. YUV material only.")]
-        [SerializeField, Range(0f, 1.5f)] private float sharpenStrength = 0.4f;
+        [Tooltip("How strongly automatic night mode brightens dark footage - 0 by default (no processing at all until the pilot raises this). Turn this down if it's over-brightening in your conditions rather than fighting it with negative Brightness above. YUV material only.")]
+        [SerializeField, Range(0f, 1f)] private float nightModeStrength = 0f;
+        [Tooltip("How strongly the automatic sharpening pass counters H.264 softness - 0 by default (no processing at all until the pilot raises this). YUV material only.")]
+        [SerializeField, Range(0f, 1.5f)] private float sharpenStrength = 0f;
+        [Tooltip("A partir de quelle luminance le night mode commence a relever l'image. Plus haut = seul le vraiment sombre est releve ; plus bas = l'effet mord aussi sur les demi-teintes.")]
+        [SerializeField, Range(0.5f, 4f)] private float nightModeThreshold = 2f;
+        [Tooltip("Flou melange proportionnellement au boost night mode, pour masquer le bruit capteur que ce boost amplifie. Sans effet si Night Mode Strength = 0.")]
+        [SerializeField, Range(0f, 1f)] private float nightModeBlurStrength = 0f;
+        [Tooltip("Lissage a preservation de contours. Attenue le bruit et le blocking H.264 dans les zones plates tout en gardant les contours nets - c'est le reglage a monter pour une image plus douce SANS perdre de detail. 0.4 a 0.6 est un bon point de depart.")]
+        [SerializeField, Range(0f, 1f)] private float smoothStrength = 0f;
+        [Tooltip("A partir de quel ecart de luminance le lissage considere qu'il y a un contour a preserver. Bas = preserve plus de detail mais lisse moins ; haut = lisse plus mais commence a manger les contours faibles.")]
+        [SerializeField, Range(0.01f, 0.5f)] private float smoothEdgeThreshold = 0.08f;
+        [Tooltip("Correction du positionnement chroma 4:2:0, en texels luma. 0.5 correspond au siting 'left' standard du H.264 et supprime une frange de couleur d'un demi-pixel sur les contours verticaux. Ne toucher que si tu vois un lisere colore decale.")]
+        [SerializeField, Range(-1f, 1f)] private float chromaSiteOffset = 0.5f;
+
+        [Header("=== IMAGE QUALITY (materiau YUV) ===")]
+        [Tooltip("Upscale bicubique Catmull-Rom au lieu du bilineaire. Nettement plus propre pour agrandir du 960x720 sur un grand ecran virtuel.")]
+        [SerializeField] private bool bicubicUpscale = true;
+        [Tooltip("A cocher UNIQUEMENT si l'image parait trop contrastee/sombre apres correction : signifie que PopH264 cree ses Texture2D sans le flag 'linear' et qu'Unity leur applique une conversion sRGB parasite au sampling.")]
+        [SerializeField] private bool planesSampledAsSRGB = false;
+        [Tooltip("Force BT.709 meme si le SPS n'en dit rien. Laisser decoche : la valeur vient du SPS quand une VUI est presente.")]
+        [SerializeField] private bool forceBt709 = false;
 
         [Header("=== TEST MODE ===")]
         [Tooltip("Show a generated checker pattern instead of the real feed - validate placement/material first.")]
@@ -69,6 +100,25 @@ namespace TelloQuest
         private int zoomLevel = 1; // safe non-zero default - see EffectiveZoomIndex
         private MeshRenderer screenRenderer;
         private Transform quadTransform;
+
+        // Instances RUNTIME des deux materiaux. Les champs serialises ci-dessus
+        // referencent des ASSETS de projet : ecrire dedans avec SetFloat/SetTexture
+        // modifiait l'asset lui-meme, et en Editor ces modifications etaient
+        // sauvegardees definitivement. C'est ainsi que TelloVideoYUV.mat s'est
+        // retrouve avec _SharpenStrength=0.4 et _NightModeStrength=0.35 grave
+        // dedans alors que le shader les declare a 0. On travaille desormais sur
+        // des copies, les assets restent intacts.
+        private Material rgbaInstance;
+        private Material yuvInstance;
+
+        private static readonly int YTexId = Shader.PropertyToID("_YTex");
+        private static readonly int UVTexId = Shader.PropertyToID("_UVTex");
+        private static readonly int CropScaleId = Shader.PropertyToID("_CropScale");
+        private static readonly int SwapUVId = Shader.PropertyToID("_SwapUV");
+        private static readonly int OpacityId = Shader.PropertyToID("_Opacity");
+        private static readonly int SrcBlendId = Shader.PropertyToID("_SrcBlend");
+        private static readonly int DstBlendId = Shader.PropertyToID("_DstBlend");
+        private static readonly int ZWriteId = Shader.PropertyToID("_ZWrite");
 
         public int ZoomLevel => zoomLevel;
         public int MaxZoomLevel => zoomMultipliers.Length;
@@ -89,6 +139,14 @@ namespace TelloQuest
         public float Contrast => contrast;
         public float NightModeStrength => nightModeStrength;
         public float SharpenStrength => sharpenStrength;
+        public float SmoothStrength => smoothStrength;
+        public float SmoothEdgeThreshold => smoothEdgeThreshold;
+        public float NightModeThreshold => nightModeThreshold;
+        public float NightModeBlurStrength => nightModeBlurStrength;
+        public float ChromaSiteOffset => chromaSiteOffset;
+        public bool BicubicUpscale => bicubicUpscale;
+        public bool PlanesSampledAsSRGB => planesSampledAsSRGB;
+        public bool ForceBt709 => forceBt709;
 
         /// <summary>Raised whenever the zoom level changes - banners listen to this to stay glued to the resized screen.</summary>
         public event System.Action OnSizeChanged;
@@ -118,16 +176,66 @@ namespace TelloQuest
 
         private void ApplyOpacity()
         {
-            if (rgbaMaterial != null)
+            if (rgbaInstance != null)
             {
-                Color c = rgbaMaterial.color;
+                Color c = rgbaInstance.color;
                 c.a = opacity;
-                rgbaMaterial.color = c;
+                rgbaInstance.color = c;
             }
-            if (yuvMaterial != null)
+            if (yuvInstance == null) return;
+
+            yuvInstance.SetFloat(OpacityId, opacity);
+
+            // A opacite pleine on repasse en rendu opaque. Le shader tournait en
+            // permanence en file Transparent avec alpha blending et ZWrite Off,
+            // meme a opacite 1 : sur le GPU tuile du Quest c'est de la bande
+            // passante de blending payee pour rien, et aucun early-Z possible.
+            bool opaque = opacity >= 0.999f;
+            yuvInstance.SetFloat(SrcBlendId, (float)(opaque ? UnityEngine.Rendering.BlendMode.One : UnityEngine.Rendering.BlendMode.SrcAlpha));
+            yuvInstance.SetFloat(DstBlendId, (float)(opaque ? UnityEngine.Rendering.BlendMode.Zero : UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha));
+            yuvInstance.SetFloat(ZWriteId, opaque ? 1f : 0f);
+            yuvInstance.renderQueue = opaque
+                ? (int)UnityEngine.Rendering.RenderQueue.Geometry
+                : (int)UnityEngine.Rendering.RenderQueue.Transparent;
+        }
+
+        /// <summary>Recopie dans le materiau ce que le decodeur a reellement lu dans
+        /// le flux : crop du padding MediaCodec, plage full/limited, matrice
+        /// BT.601/709, ordre des canaux chroma. Appele au demarrage et a chaque fois
+        /// que le decodeur signale un changement de format.</summary>
+        private void ApplyDecoderFormat()
+        {
+            if (yuvInstance == null) return;
+
+            Vector2 crop = decoder != null ? decoder.CropScale : Vector2.one;
+            yuvInstance.SetVector(CropScaleId, new Vector4(crop.x, crop.y, 0f, 0f));
+
+            if (decoder != null)
             {
-                yuvMaterial.SetFloat("_Opacity", opacity);
+                yuvInstance.SetFloat(SwapUVId, decoder.UvChannelsSwapped ? 1f : 0f);
+                SetKeyword(yuvInstance, "_FULLRANGE_ON", decoder.IsFullRange);
+                SetKeyword(yuvInstance, "_BT709_ON", forceBt709 || decoder.IsBt709);
             }
+
+            SetKeyword(yuvInstance, "_BICUBIC_ON", bicubicUpscale);
+            SetKeyword(yuvInstance, "_PLANES_SRGB_ON", planesSampledAsSRGB);
+            ApplyEnhanceKeyword();
+        }
+
+        /// <summary>Les 4 taps voisins du sharpen / night mode etaient payes a chaque
+        /// pixel meme quand les deux effets etaient a zero (leur valeur par defaut).
+        /// Le mot-cle les supprime completement dans ce cas.</summary>
+        private void ApplyEnhanceKeyword()
+        {
+            if (yuvInstance == null) return;
+            bool enhance = sharpenStrength > 0.001f || nightModeStrength > 0.001f || smoothStrength > 0.001f;
+            SetKeyword(yuvInstance, "_ENHANCE_ON", enhance);
+        }
+
+        private static void SetKeyword(Material material, string keyword, bool enabled)
+        {
+            if (enabled) material.EnableKeyword(keyword);
+            else material.DisableKeyword(keyword);
         }
 
         /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV
@@ -140,38 +248,95 @@ namespace TelloQuest
 
         private void ApplyWhiteBalanceShift()
         {
-            if (yuvMaterial != null)
-            {
-                yuvMaterial.SetFloat("_WhiteBalanceShift", whiteBalanceShift);
-            }
+            if (yuvInstance != null) yuvInstance.SetFloat("_WhiteBalanceShift", whiteBalanceShift);
         }
 
         /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
         public void SetBrightness(float value)
         {
             brightness = Mathf.Clamp(value, -1f, 1f);
-            if (yuvMaterial != null) yuvMaterial.SetFloat("_Brightness", brightness);
+            if (yuvInstance != null) yuvInstance.SetFloat("_Brightness", brightness);
         }
 
         /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
         public void SetContrast(float value)
         {
             contrast = Mathf.Clamp(value, 0.5f, 2f);
-            if (yuvMaterial != null) yuvMaterial.SetFloat("_Contrast", contrast);
+            if (yuvInstance != null) yuvInstance.SetFloat("_Contrast", contrast);
         }
 
         /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
         public void SetNightModeStrength(float value)
         {
             nightModeStrength = Mathf.Clamp01(value);
-            if (yuvMaterial != null) yuvMaterial.SetFloat("_NightModeStrength", nightModeStrength);
+            if (yuvInstance != null) yuvInstance.SetFloat("_NightModeStrength", nightModeStrength);
+            ApplyEnhanceKeyword();
         }
 
         /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
         public void SetSharpenStrength(float value)
         {
             sharpenStrength = Mathf.Clamp(value, 0f, 1.5f);
-            if (yuvMaterial != null) yuvMaterial.SetFloat("_SharpenStrength", sharpenStrength);
+            if (yuvInstance != null) yuvInstance.SetFloat("_SharpenStrength", sharpenStrength);
+            ApplyEnhanceKeyword();
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetNightModeThreshold(float value)
+        {
+            nightModeThreshold = Mathf.Clamp(value, 0.5f, 4f);
+            if (yuvInstance != null) yuvInstance.SetFloat("_NightModeThreshold", nightModeThreshold);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetNightModeBlurStrength(float value)
+        {
+            nightModeBlurStrength = Mathf.Clamp01(value);
+            if (yuvInstance != null) yuvInstance.SetFloat("_NightModeBlurStrength", nightModeBlurStrength);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetChromaSiteOffset(float value)
+        {
+            chromaSiteOffset = Mathf.Clamp(value, -1f, 1f);
+            if (yuvInstance != null) yuvInstance.SetFloat("_ChromaSiteOffset", chromaSiteOffset);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Bascule le mot-cle de shader.</summary>
+        public void SetBicubicUpscale(bool value)
+        {
+            bicubicUpscale = value;
+            if (yuvInstance != null) SetKeyword(yuvInstance, "_BICUBIC_ON", bicubicUpscale);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Bascule le mot-cle de shader.</summary>
+        public void SetPlanesSampledAsSRGB(bool value)
+        {
+            planesSampledAsSRGB = value;
+            if (yuvInstance != null) SetKeyword(yuvInstance, "_PLANES_SRGB_ON", planesSampledAsSRGB);
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Bascule le mot-cle de shader.
+        /// N'a d'effet que si le SPS ne declare pas deja explicitement une matrice.</summary>
+        public void SetForceBt709(bool value)
+        {
+            forceBt709 = value;
+            if (yuvInstance != null) SetKeyword(yuvInstance, "_BT709_ON", forceBt709 || (decoder != null && decoder.IsBt709));
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetSmoothStrength(float value)
+        {
+            smoothStrength = Mathf.Clamp01(value);
+            if (yuvInstance != null) yuvInstance.SetFloat("_SmoothStrength", smoothStrength);
+            ApplyEnhanceKeyword();
+        }
+
+        /// <summary>Called by TelloSettingsScreen on save. Only applies to the YUV material.</summary>
+        public void SetSmoothEdgeThreshold(float value)
+        {
+            smoothEdgeThreshold = Mathf.Clamp(value, 0.01f, 0.5f);
+            if (yuvInstance != null) yuvInstance.SetFloat("_SmoothEdgeThreshold", smoothEdgeThreshold);
         }
 
         private void ApplyZoomScale()
@@ -193,6 +358,14 @@ namespace TelloQuest
             contrast = PlayerPrefs.GetFloat(PrefsPrefix + "Contrast", contrast);
             nightModeStrength = PlayerPrefs.GetFloat(PrefsPrefix + "NightModeStrength", nightModeStrength);
             sharpenStrength = PlayerPrefs.GetFloat(PrefsPrefix + "SharpenStrength", sharpenStrength);
+            nightModeBlurStrength = PlayerPrefs.GetFloat(PrefsPrefix + "NightModeBlur", nightModeBlurStrength);
+            nightModeThreshold = PlayerPrefs.GetFloat(PrefsPrefix + "NightModeThreshold", nightModeThreshold);
+            chromaSiteOffset = PlayerPrefs.GetFloat(PrefsPrefix + "ChromaSiteOffset", chromaSiteOffset);
+            bicubicUpscale = PlayerPrefs.GetInt(PrefsPrefix + "Bicubic", bicubicUpscale ? 1 : 0) == 1;
+            planesSampledAsSRGB = PlayerPrefs.GetInt(PrefsPrefix + "PlanesSRGB", planesSampledAsSRGB ? 1 : 0) == 1;
+            forceBt709 = PlayerPrefs.GetInt(PrefsPrefix + "ForceBt709", forceBt709 ? 1 : 0) == 1;
+            smoothStrength = PlayerPrefs.GetFloat(PrefsPrefix + "SmoothStrength", smoothStrength);
+            smoothEdgeThreshold = PlayerPrefs.GetFloat(PrefsPrefix + "SmoothEdge", smoothEdgeThreshold);
             defaultZoomLevel = PlayerPrefs.GetInt(PrefsPrefix + "ZoomLevel", defaultZoomLevel);
         }
 
@@ -209,12 +382,29 @@ namespace TelloQuest
             PlayerPrefs.SetFloat(PrefsPrefix + "Contrast", contrast);
             PlayerPrefs.SetFloat(PrefsPrefix + "NightModeStrength", nightModeStrength);
             PlayerPrefs.SetFloat(PrefsPrefix + "SharpenStrength", sharpenStrength);
+            PlayerPrefs.SetFloat(PrefsPrefix + "NightModeBlur", nightModeBlurStrength);
+            PlayerPrefs.SetFloat(PrefsPrefix + "NightModeThreshold", nightModeThreshold);
+            PlayerPrefs.SetFloat(PrefsPrefix + "ChromaSiteOffset", chromaSiteOffset);
+            PlayerPrefs.SetInt(PrefsPrefix + "Bicubic", bicubicUpscale ? 1 : 0);
+            PlayerPrefs.SetInt(PrefsPrefix + "PlanesSRGB", planesSampledAsSRGB ? 1 : 0);
+            PlayerPrefs.SetInt(PrefsPrefix + "ForceBt709", forceBt709 ? 1 : 0);
+            PlayerPrefs.SetFloat(PrefsPrefix + "SmoothStrength", smoothStrength);
+            PlayerPrefs.SetFloat(PrefsPrefix + "SmoothEdge", smoothEdgeThreshold);
             PlayerPrefs.SetInt(PrefsPrefix + "ZoomLevel", zoomLevel);
+            PlayerPrefs.Save(); // manquait : les reglages n'etaient pas garantis ecrits sur disque
         }
 
         private void Awake()
         {
             if (decoder == null) decoder = GetComponent<TelloVideoDecoder>();
+
+            if (rgbaMaterial == null || yuvMaterial == null)
+                Debug.LogError("[TelloVideoDisplay] rgbaMaterial or yuvMaterial not assigned in the inspector - create them as project assets first (see class doc comment).");
+
+            // Copies runtime : on ne touche plus jamais aux assets de projet.
+            if (rgbaMaterial != null) rgbaInstance = new Material(rgbaMaterial) { name = rgbaMaterial.name + " (runtime)" };
+            if (yuvMaterial != null) yuvInstance = new Material(yuvMaterial) { name = yuvMaterial.name + " (runtime)" };
+
             LoadPersistedSettings();
             BuildQuad();
 
@@ -222,16 +412,19 @@ namespace TelloQuest
             ApplyZoomScale();
             ApplyOpacity();
             ApplyWhiteBalanceShift();
-            if (yuvMaterial != null)
+            if (yuvInstance != null)
             {
-                yuvMaterial.SetFloat("_Brightness", brightness);
-                yuvMaterial.SetFloat("_Contrast", contrast);
-                yuvMaterial.SetFloat("_NightModeStrength", nightModeStrength);
-                yuvMaterial.SetFloat("_SharpenStrength", sharpenStrength);
+                yuvInstance.SetFloat("_Brightness", brightness);
+                yuvInstance.SetFloat("_Contrast", contrast);
+                yuvInstance.SetFloat("_NightModeStrength", nightModeStrength);
+                yuvInstance.SetFloat("_SharpenStrength", sharpenStrength);
+                yuvInstance.SetFloat("_NightModeBlurStrength", nightModeBlurStrength);
+                yuvInstance.SetFloat("_NightModeThreshold", nightModeThreshold);
+                yuvInstance.SetFloat("_SmoothStrength", smoothStrength);
+                yuvInstance.SetFloat("_SmoothEdgeThreshold", smoothEdgeThreshold);
+                yuvInstance.SetFloat("_ChromaSiteOffset", chromaSiteOffset);
             }
-
-            if (rgbaMaterial == null || yuvMaterial == null)
-                Debug.LogError("[TelloVideoDisplay] rgbaMaterial or yuvMaterial not assigned in the inspector - create them as project assets first (see class doc comment).");
+            ApplyDecoderFormat();
 
             ApplyOrientation();
 
@@ -240,35 +433,45 @@ namespace TelloQuest
 
         private void OnEnable()
         {
-            if (decoder != null) decoder.OnTextureUpdated += HandleTextureUpdated;
+            if (decoder == null) return;
+            decoder.OnTextureUpdated += HandleTextureUpdated;
+            decoder.OnVideoFormatChanged += ApplyDecoderFormat;
         }
 
         private void OnDisable()
         {
-            if (decoder != null) decoder.OnTextureUpdated -= HandleTextureUpdated;
+            if (decoder == null) return;
+            decoder.OnTextureUpdated -= HandleTextureUpdated;
+            decoder.OnVideoFormatChanged -= ApplyDecoderFormat;
+        }
+
+        private void OnDestroy()
+        {
+            if (rgbaInstance != null) Destroy(rgbaInstance);
+            if (yuvInstance != null) Destroy(yuvInstance);
         }
 
         /// <summary>Applies a fixed vertical flip as a UV transform - RGBA material via the standard mainTextureScale/Offset, YUV material via explicit shader properties. See the class doc comment for why this one fixed transform is correct (not a per-project setting).</summary>
         private void ApplyOrientation()
         {
-            if (rgbaMaterial != null)
+            if (rgbaInstance != null)
             {
-                rgbaMaterial.mainTextureScale = new Vector2(1f, -1f);
-                rgbaMaterial.mainTextureOffset = new Vector2(0f, 1f);
+                rgbaInstance.mainTextureScale = new Vector2(1f, -1f);
+                rgbaInstance.mainTextureOffset = new Vector2(0f, 1f);
             }
-            if (yuvMaterial != null)
+            if (yuvInstance != null)
             {
-                yuvMaterial.SetFloat("_FlipU", 0f);
-                yuvMaterial.SetFloat("_FlipV", 1f);
+                yuvInstance.SetFloat("_FlipU", 0f);
+                yuvInstance.SetFloat("_FlipV", 1f);
             }
         }
 
         private void ShowTestTexture()
         {
-            if (rgbaMaterial == null) return;
+            if (rgbaInstance == null) return;
             Texture2D tex = customTestTexture != null ? customTestTexture : GenerateCheckerTexture();
-            rgbaMaterial.mainTexture = tex;
-            screenRenderer.sharedMaterial = rgbaMaterial;
+            rgbaInstance.mainTexture = tex;
+            screenRenderer.sharedMaterial = rgbaInstance;
         }
 
         private void HandleTextureUpdated()
@@ -277,18 +480,20 @@ namespace TelloQuest
 
             if (decoder.IsYuvNv12)
             {
-                if (yuvMaterial == null) return;
-                screenRenderer.sharedMaterial = yuvMaterial;
-                yuvMaterial.SetTexture("_YTex", decoder.YPlane);
-                yuvMaterial.SetTexture("_UVTex", decoder.UVPlane);
-                yuvMaterial.SetFloat("_SwapUV", decoder.UvChannelsSwapped ? 1f : 0f);
+                if (yuvInstance == null) return;
+                if (screenRenderer.sharedMaterial != yuvInstance) screenRenderer.sharedMaterial = yuvInstance;
+                // Les Texture2D de PopH264 sont reutilisees d'une frame a l'autre :
+                // on ne reassigne que si l'objet a reellement change, sinon c'est un
+                // SetTexture inutile a chaque frame decodee.
+                if (yuvInstance.GetTexture(YTexId) != decoder.YPlane) yuvInstance.SetTexture(YTexId, decoder.YPlane);
+                if (yuvInstance.GetTexture(UVTexId) != decoder.UVPlane) yuvInstance.SetTexture(UVTexId, decoder.UVPlane);
             }
             else
             {
-                if (rgbaMaterial == null) return;
-                screenRenderer.sharedMaterial = rgbaMaterial;
-                if (rgbaMaterial.mainTexture != decoder.VideoTexture)
-                    rgbaMaterial.mainTexture = decoder.VideoTexture;
+                if (rgbaInstance == null) return;
+                if (screenRenderer.sharedMaterial != rgbaInstance) screenRenderer.sharedMaterial = rgbaInstance;
+                if (rgbaInstance.mainTexture != decoder.VideoTexture)
+                    rgbaInstance.mainTexture = decoder.VideoTexture;
             }
         }
 
@@ -313,16 +518,21 @@ namespace TelloQuest
             if (!decoder.IsYuvNv12)
                 return decoder.VideoTexture;
 
-            if (yuvMaterial == null || decoder.YPlane == null || decoder.UVPlane == null) return null;
+            if (yuvInstance == null || decoder.YPlane == null || decoder.UVPlane == null) return null;
 
-            int width = decoder.YPlane.width;
-            int height = decoder.YPlane.height;
+            // Dimensions REELLES (SPS), pas celles de la texture : celle-ci peut
+            // inclure le padding d'alignement MediaCodec, qui se retrouverait dans
+            // le PNG sous forme de bandes vertes.
+            int width = decoder.VideoWidth > 0 ? decoder.VideoWidth : decoder.YPlane.width;
+            int height = decoder.VideoHeight > 0 ? decoder.VideoHeight : decoder.YPlane.height;
 
-            RenderTexture rt = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            // sRGB explicite : le shader sort desormais du lineaire, donc sans ce
+            // flag le PNG serait beaucoup plus sombre que ce qu'on voit a l'ecran.
+            RenderTexture rt = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
             RenderTexture previousActive = RenderTexture.active;
             try
             {
-                Graphics.Blit(null, rt, yuvMaterial);
+                Graphics.Blit(null, rt, yuvInstance);
                 RenderTexture.active = rt;
 
                 var snapshot = new Texture2D(width, height, TextureFormat.RGB24, false);

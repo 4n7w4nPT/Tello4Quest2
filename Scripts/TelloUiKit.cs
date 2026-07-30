@@ -228,6 +228,62 @@ namespace TelloQuest
             return null;
         }
 
+        /// <summary>
+        /// Resout la position locale du CENTRE d'un panneau lateral incline, de sorte
+        /// que son bord interne (celui qui longe l'ecran video) tombe exactement dans
+        /// le plan de l'ecran.
+        ///
+        /// LE PROBLEME : la rotation "cockpit" etait appliquee autour du centre du
+        /// panneau. Un panneau de demi-largeur h incline de a degres voit alors son
+        /// bord externe avancer de h*sin(a) et son bord interne reculer d'autant -
+        /// donc passer DERRIERE le plan de l'ecran video, qui le masque sur toute
+        /// cette bande. C'est exactement le symptome observe : la partie droite du
+        /// panneau gauche et la partie gauche du panneau droit disparaissaient.
+        ///
+        /// LA SOLUTION : on pivote de fait autour du bord interne. On calcule ou ce
+        /// bord atterrit compte tenu de la rotation, puis on translate tout le panneau
+        /// pour le ramener a z = 0 et a la bonne distance horizontale. L'inclinaison
+        /// ressentie est identique, mais plus rien ne passe derriere l'ecran.
+        ///
+        /// La formule ne suppose aucune convention de signe "vers le pilote" : elle
+        /// resout la position quel que soit le sens dans lequel le panneau s'incline.
+        /// Elle corrige aussi un ecart horizontal au passage - la projection en cosinus
+        /// eloignait auparavant le bord interne de h*(1 - cos a) de plus que prevu.
+        /// </summary>
+        /// <param name="rotation">Rotation locale deja choisie pour le panneau.</param>
+        /// <param name="innerEdgeLocalOffset">Position du bord interne dans le repere du panneau, avant rotation (ex. (+h,0,0) pour un panneau a gauche de l'ecran, (-h,0,0) pour un panneau a droite).</param>
+        /// <param name="innerEdgeDistanceFromCentre">Distance horizontale souhaitee entre le centre de l'ecran et le bord interne, toujours positive.</param>
+        /// <param name="halfPanelWidth">Demi-largeur du panneau, utilisee pour le repli non ancre.</param>
+        /// <param name="pinInnerEdge">false = ancien comportement (rotation autour du centre).</param>
+        /// <param name="depthOffset">Decalage supplementaire en Z local, applique apres l'ancrage.</param>
+        public static Vector3 SolvePinnedPanelPosition(
+            Quaternion rotation,
+            Vector3 innerEdgeLocalOffset,
+            float innerEdgeDistanceFromCentre,
+            float halfPanelWidth,
+            bool pinInnerEdge,
+            float depthOffset)
+        {
+            // Cote de l'ecran : deduit du signe du bord interne. Un panneau dont le
+            // bord interne est a droite (+x) dans son propre repere se trouve a GAUCHE
+            // de l'ecran, et inversement.
+            float side = innerEdgeLocalOffset.x >= 0f ? -1f : 1f;
+
+            if (!pinInnerEdge)
+            {
+                // Comportement d'origine, conserve pour pouvoir comparer.
+                return new Vector3(side * (innerEdgeDistanceFromCentre + halfPanelWidth), 0f, depthOffset);
+            }
+
+            // Ou le bord interne atterrit-il une fois le panneau tourne ?
+            Vector3 rotatedInnerEdge = rotation * innerEdgeLocalOffset;
+
+            // On veut : centre + rotatedInnerEdge == (side * distance, y, 0).
+            float x = side * innerEdgeDistanceFromCentre - rotatedInnerEdge.x;
+            float z = -rotatedInnerEdge.z + depthOffset;
+            return new Vector3(x, 0f, z);
+        }
+
         public static Vector3 ComputeFixedPosition(Transform vrCamera, float distanceFromCamera, float assumedEyeHeightMeters, float verticalOffset)
         {
             Vector3 flatForward = Vector3.ProjectOnPlane(vrCamera.forward, Vector3.up).normalized;

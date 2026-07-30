@@ -71,7 +71,11 @@ namespace TelloQuest
         private void Awake()
         {
             if (tello == null) tello = TelloConnection.Instance;
-            if (gamepadController == null) gamepadController = GetComponent<TelloGamepadController>();
+            // Pas de fallback GetComponent ici : dans la scene, TelloGamepadController
+            // vit sur son PROPRE GameObject, donc ce fallback rendait toujours null et
+            // masquait une reference oubliee derriere un affichage "--" silencieux.
+            if (gamepadController == null)
+                Debug.LogError("[TelloOptionsPanel] gamepadController non assigne dans l'Inspector - les cartes vitesse/sensibilite resteront a '--'.");
             roundedSprite = TelloUiKit.GetRoundedSprite(cardCornerRadiusPx);
             BuildUI();
             // NOT positioned here - Unity doesn't guarantee Awake() order across
@@ -113,7 +117,9 @@ namespace TelloQuest
             if (videoScreen != null)
             {
                 videoScreen.OnSizeChanged += PositionBelowScreen;
-                videoScreen.OnSizeChanged += RefreshValues;
+                // (RefreshValues etait aussi abonne ici : residu du "Menu mode"
+                // supprime. Un changement de taille d'ecran n'a aucune raison de
+                // rafraichir le niveau de vitesse.)
             }
 
             if (gamepadController == null) return;
@@ -126,7 +132,6 @@ namespace TelloQuest
             if (videoScreen != null)
             {
                 videoScreen.OnSizeChanged -= PositionBelowScreen;
-                videoScreen.OnSizeChanged -= RefreshValues;
             }
 
             if (gamepadController == null) return;
@@ -221,24 +226,49 @@ namespace TelloQuest
         private void RefreshValues()
         {
             if (gamepadController == null) return;
-            speedValue.text = $"{gamepadController.SpeedLevel}/{MaxSpeedLevel}";
-            sensitivityValue.text = $"{gamepadController.SensitivityLevel}/{MaxSensitivityLevel}";
+            speedValue.SetText("{0}/{1}", gamepadController.SpeedLevel, MaxSpeedLevel);
+            sensitivityValue.SetText("{0}/{1}", gamepadController.SensitivityLevel, MaxSensitivityLevel);
         }
+
+        // Rafraichissement des valeurs continues.
+        //
+        // ANCIEN COMPORTEMENT : 6 interpolations de chaine PAR FRAME (donc 6
+        // allocations, et 6 reconstructions de mesh TextMeshPro a 72 Hz), pour des
+        // valeurs qui viennent d'un flux telemetrie a ~10 Hz. C'etait du temps
+        // main-thread et du rebuild de canvas voles au pipeline video, pour afficher
+        // exactement la meme chose 7 fois de suite.
+        //
+        // Maintenant : cadence a UiRefreshHz, et SetText(format, arg) de TMP qui ne
+        // fait aucune allocation (contrairement a "text = $"...""). La batterie du
+        // casque, elle, est lue encore plus rarement : SystemInfo.batteryLevel est un
+        // appel natif et sa valeur ne bouge qu'a l'echelle de la minute.
+        private const float UiRefreshHz = 8f;
+        private float refreshTimer;
+        private float headsetBatteryTimer;
+        private const float HeadsetBatteryIntervalSeconds = 10f;
 
         private void Update()
         {
-            // Altitude/flight time/ground speed/batteries/time-remaining change
-            // continuously, unlike the discrete speed/sensitivity levels (which
-            // only refresh on their change events) - keep them live every frame.
             if (tello == null) return;
-            altitudeText.text = $"{tello.HeightM:F1}m";
-            flightTimeText.text = tello.FlightTimeFormatted;
-            groundSpeedText.text = $"{tello.VelocityMagnitude:F0}cm/s";
-            timeRemainingText.text = tello.EstimatedRemainingFlightTimeFormatted;
-            batteryTelloText.text = $"{tello.Battery}%";
-            batteryHeadsetText.text = SystemInfo.batteryLevel >= 0f
-                ? $"{SystemInfo.batteryLevel * 100f:F0}%"
-                : "N/A";
+
+            refreshTimer += Time.deltaTime;
+            if (refreshTimer < 1f / UiRefreshHz) return;
+            refreshTimer = 0f;
+
+            altitudeText.SetText("{0:1}m", tello.HeightM);
+            flightTimeText.SetText(tello.FlightTimeFormatted);
+            groundSpeedText.SetText("{0:0}cm/s", tello.VelocityMagnitude);
+            timeRemainingText.SetText(tello.EstimatedRemainingFlightTimeFormatted);
+            batteryTelloText.SetText("{0}%", tello.Battery);
+
+            headsetBatteryTimer -= 1f / UiRefreshHz;
+            if (headsetBatteryTimer <= 0f)
+            {
+                headsetBatteryTimer = HeadsetBatteryIntervalSeconds;
+                float level = SystemInfo.batteryLevel;
+                if (level >= 0f) batteryHeadsetText.SetText("{0:0}%", level * 100f);
+                else batteryHeadsetText.SetText("N/A");
+            }
         }
     }
 }
