@@ -234,6 +234,8 @@ MonoBehaviour:
   cardCornerRadiusPx: 14
   gap: 0.01
   cockpitAngleDegrees: 20
+  pinInnerEdgeToScreenDepth: 1
+  panelDepthOffset: 0
   positionedExternally: 1
   maxEntries: 16
   oldestEntryAlpha: 0.3
@@ -356,6 +358,7 @@ MonoBehaviour:
   contrast: 1
   nightModeStrength: 0.35
   sharpenStrength: 0.3
+  nightModeThreshold: 2
   nightModeBlurStrength: 0
   smoothStrength: 0.5
   smoothEdgeThreshold: 0.08
@@ -603,7 +606,7 @@ MonoBehaviour:
   _monoscopic: 0
   _sharpenType: 65536
   _disableRecording: 0
-  _enableDynamicResolution: 0
+  _enableDynamicResolution: 1
   minDynamicResolutionScale: 1
   maxDynamicResolutionScale: 1
   quest2MinDynamicResolutionScale: 0.7
@@ -677,6 +680,56 @@ MonoBehaviour:
   _readOnlyFastMotionModeHandPosesEnabled: 0
   fastMotionModeHandPosesEnabled: 0
   dynamicResolutionVersion: 1
+--- !u!1 &974219977
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 974219979}
+  - component: {fileID: 974219978}
+  m_Layer: 0
+  m_Name: TelloControlsScreen
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 0
+--- !u!114 &974219978
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 974219977}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 54de4cc76d74f0842a7eba7ba37f3ae1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::TelloQuest.TelloControlsScreen
+  initGate: {fileID: 1664443220}
+  worldWidth: 0.9
+  cornerRadiusPx: 20
+  displayFont: {fileID: 11400000, guid: 23a60abf9dc3e594db8f8c89dd9e540e, type: 2}
+  bodyFont: {fileID: 11400000, guid: 752968831af0a8044b8e6e10aa2aec25, type: 2}
+  monoFont: {fileID: 11400000, guid: c0e45f70d32291a439984d50683cd1ad, type: 2}
+--- !u!4 &974219979
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 974219977}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1089214667
 GameObject:
   m_ObjectHideFlags: 0
@@ -743,6 +796,7 @@ MonoBehaviour:
   videoReceiver: {fileID: 1275375341}
   threadedDecoding: 1
   decoderStallTimeoutSeconds: 3
+  maxDrainMilliseconds: 2
   verboseDiagnostics: 0
 --- !u!114 &1275375341
 MonoBehaviour:
@@ -831,6 +885,8 @@ MonoBehaviour:
   cardCornerRadiusPx: 14
   gap: 0.01
   cockpitAngleDegrees: 20
+  pinInnerEdgeToScreenDepth: 1
+  panelDepthOffset: 0
   positionedExternally: 1
   sampleIntervalSeconds: 1
   initialWindowSeconds: 120
@@ -980,6 +1036,8 @@ MonoBehaviour:
   actionLogPanel: {fileID: 298983488}
   settingsScreenObject: {fileID: 1879562469}
   settingsScreen: {fileID: 1879562470}
+  controlsScreenObject: {fileID: 974219977}
+  controlsScreen: {fileID: 974219978}
   distanceFromCamera: 1.2
   assumedEyeHeightMeters: 1.6
   verticalOffset: -0.3
@@ -1045,8 +1103,10 @@ MonoBehaviour:
   tello: {fileID: 122290289}
   gamepadController: {fileID: 1643372461}
   videoScreen: {fileID: 561222205}
-  spatialPanel: {fileID: 0}
+  spatialPanel: {fileID: 1531549295}
   statusPanel: {fileID: 2079953653}
+  videoDecoder: {fileID: 1275375340}
+  actionLogPanel: {fileID: 298983488}
   secondsForFullSweep: 1.5
   worldWidth: 0.9
   cornerRadiusPx: 20
@@ -1363,3 +1423,4 @@ SceneRoots:
   - {fileID: 547916906}
   - {fileID: 1531549296}
   - {fileID: 298983489}
+  - {fileID: 974219979}

@@ -244,7 +244,7 @@ namespace TelloQuest
                 OnFrameReady?.Invoke(frame);
             }
 
-            if (!verboseDiagnostics) return;
+            if (!verboseDiagnostics || !TelloUiKit.DiagnosticsEnabled) return;
             diagnosticLogTimer += Time.deltaTime;
             if (diagnosticLogTimer >= 1f)
             {

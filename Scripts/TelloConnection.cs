@@ -338,6 +338,25 @@ namespace TelloQuest
         /// <summary>Firmware SDK version string, populated after a "sdk?" query (sent once automatically on connect).</summary>
         public string SdkVersion => sdkVersion;
 
+        /// <summary>Numero de version majeur du SDK, deduit de la reponse a "sdk?".
+        /// 0 = inconnu (pas encore repondu, ou drone grand public qui ne connait tout
+        /// simplement pas la commande et repond "unknown command: sdk?").</summary>
+        public int SdkMajorVersion { get; private set; }
+
+        /// <summary>True uniquement si le drone a explicitement annonce un SDK 2.0+.
+        /// C'est la condition pour que setbitrate / setresolution / setfps existent.
+        ///
+        /// Volontairement pessimiste : tant qu'on n'a pas VU une reponse valide, on
+        /// considere que ces commandes n'existent pas. Un Tello grand public repond
+        /// "unknown command: sdk?", ce qui ne parse pas et laisse donc la valeur a
+        /// false - exactement le comportement voulu.</summary>
+        public bool SupportsSdk20Commands => SdkMajorVersion >= 20;
+
+        /// <summary>True tant qu'aucune reponse exploitable a "sdk?" n'est arrivee.
+        /// Permet a l'UI de distinguer "on sait que ce n'est pas supporte" de
+        /// "on ne sait pas encore" et d'afficher un libelle honnete.</summary>
+        public bool SdkVersionUnknown => SdkMajorVersion == 0;
+
         /// <summary>Rough estimated position (cm) relative to the takeoff point. Dead reckoning: drifts over time, indicative only.</summary>
         public Vector2 EstimatedPositionCm => estimatedPositionCm;
         public float DistanceFromHomeCm => estimatedPositionCm.magnitude;
@@ -413,7 +432,11 @@ namespace TelloQuest
 
         private void OnApplicationPause(bool isPaused)
         {
-            if (!isPaused) TryReconnectIfNeeded();
+            // Le casque peut etre repose sans jamais repasser par un atterrissage :
+            // on vide le tampon du journal de vol ici aussi, sinon les dernieres
+            // secondes seraient perdues.
+            if (isPaused) FlushFlightLog();
+            else TryReconnectIfNeeded();
         }
 
         private void TryReconnectIfNeeded()
@@ -436,6 +459,12 @@ namespace TelloQuest
         [Tooltip("Envoie aussi 'setresolution high' et 'setfps high'. Meme restriction SDK 2.0+ que ci-dessus. Passe le flux en 720p a la cadence la plus elevee disponible.")]
         [SerializeField] private bool requestHighResolutionAndFps = false;
 
+        /// <summary>Exposes pour l'ecran de parametres video. Les setters n'ont d'effet
+        /// visible que sur un drone SDK 2.0+ (voir SupportsSdk20Commands).</summary>
+        public bool SendStreamQualityCommands { get => sendStreamQualityCommands; set => sendStreamQualityCommands = value; }
+        public float VideoBitrateMbps { get => videoBitrateMbps; set => videoBitrateMbps = Mathf.Clamp(Mathf.RoundToInt(value), 0, 5); }
+        public bool RequestHighResolutionAndFps { get => requestHighResolutionAndFps; set => requestHighResolutionAndFps = value; }
+
         [Header("=== AUTO-RETRY WHILE DISCONNECTED ===")]
         [Tooltip("How often to automatically retry the connection while in Disconnected/Error state - deliberately not too aggressive, a real handshake attempt is heavier than just checking a status flag.")]
         [SerializeField] private float autoRetryIntervalSeconds = 2f;
@@ -443,6 +472,14 @@ namespace TelloQuest
 
         private void Update()
         {
+            // Vidage periodique du journal de vol (voir QueueFlightLogText).
+            flightLogFlushTimer += Time.deltaTime;
+            if (flightLogFlushTimer >= FlightLogFlushIntervalSeconds)
+            {
+                flightLogFlushTimer = 0f;
+                FlushFlightLog();
+            }
+
             autoRetryTimer += Time.deltaTime;
             if (autoRetryTimer >= autoRetryIntervalSeconds)
             {
@@ -727,7 +764,7 @@ namespace TelloQuest
                 // par session (mesure sur un log reel), chacun partant vers logcat avec
                 // une interpolation de chaine. Les commandes ponctuelles, elles, restent
                 // loggees : c'est le seul moyen de suivre ce que le drone recoit.
-                if (logRcCommands || !cmd.StartsWith("rc ", StringComparison.Ordinal))
+                if ((logRcCommands && TelloUiKit.DiagnosticsEnabled) || !cmd.StartsWith("rc ", StringComparison.Ordinal))
                     Debug.Log($"[Tello >>] {cmd}");
             }
             catch (Exception e)
@@ -784,8 +821,29 @@ namespace TelloQuest
             if (cmd == "sdk?" && !response.Equals("error", StringComparison.OrdinalIgnoreCase))
             {
                 sdkVersion = response;
-                Debug.Log($"[TelloConnection] Tello SDK version: {sdkVersion}");
+                SdkMajorVersion = ParseSdkMajorVersion(response);
+                Debug.Log($"[TelloConnection] Tello SDK version: {sdkVersion} " +
+                          $"(major={SdkMajorVersion}, SDK 2.0 commands {(SupportsSdk20Commands ? "available" : "NOT available")})");
             }
+        }
+
+        /// <summary>Extrait le numero de version majeur de la reponse a "sdk?".
+        ///
+        /// Un Tello EDU/Talent repond juste "20" ou "30". Un Tello grand public ne
+        /// connait pas la commande et repond "unknown command: sdk?" - qui contient
+        /// pourtant le chiffre... rien, mais qui pourrait en contenir sur une autre
+        /// firmware. On exige donc que la reponse soit UNIQUEMENT un nombre, plutot
+        /// que d'y pecher le premier chiffre venu : mieux vaut conclure "inconnu" que
+        /// croire a tort qu'une commande est disponible et faire echouer des envois.
+        /// </summary>
+        private static int ParseSdkMajorVersion(string response)
+        {
+            if (string.IsNullOrWhiteSpace(response)) return 0;
+            string trimmed = response.Trim();
+            return int.TryParse(trimmed, System.Globalization.NumberStyles.Integer,
+                                System.Globalization.CultureInfo.InvariantCulture, out int value)
+                ? value
+                : 0;
         }
 
         // ---------------------------------------------------------------
@@ -865,6 +923,20 @@ namespace TelloQuest
             IsStreaming = true;
 
             if (!sendStreamQualityCommands) return;
+
+            // Garde-fou : meme si la case est cochee, on n'envoie rien tant que le
+            // drone n'a pas explicitement annonce un SDK 2.0+. Sans ca, cocher la case
+            // sur un Tello grand public produit trois reponses "error" d'affilee et une
+            // pastille "Last cmd" rouge en permanence, pour une cause invisible depuis
+            // le casque. L'ecran de parametres video verrouille deja la case dans ce
+            // cas, mais la valeur peut venir des PlayerPrefs ou de l'Inspector.
+            if (!SupportsSdk20Commands)
+            {
+                Debug.Log($"[TelloConnection] Skipping SDK 2.0 stream-quality commands: " +
+                          $"drone reports SDK \"{(string.IsNullOrEmpty(sdkVersion) ? "no answer yet" : sdkVersion)}\". " +
+                          $"These commands only exist on Tello EDU / Talent.");
+                return;
+            }
 
             SendCommand($"setbitrate {Mathf.Clamp(videoBitrateMbps, 0, 5)}");
             if (requestHighResolutionAndFps)
@@ -1236,13 +1308,15 @@ namespace TelloQuest
                 if (itemUri == null) throw new Exception("MediaStore insert returned null");
 
                 flightLogOutputStream = contentResolver.Call<AndroidJavaObject>("openOutputStream", itemUri);
-                WriteRawFlightLogBytes(Encoding.UTF8.GetBytes(header));
+                flightLogBuffer.Clear();
+                QueueFlightLogText(header);
                 Debug.Log($"[TelloConnection] Flight log: Download/Tello4Quest2/{fileName}");
 #else
                 string folder = Path.Combine(Application.persistentDataPath, flightLogFolderName);
                 Directory.CreateDirectory(folder);
                 flightLogFileStream = new FileStream(Path.Combine(folder, fileName), FileMode.Create, FileAccess.Write);
-                WriteRawFlightLogBytes(Encoding.UTF8.GetBytes(header));
+                flightLogBuffer.Clear();
+                QueueFlightLogText(header);
                 Debug.Log($"[TelloConnection] (Editor) Flight log: {Path.Combine(folder, fileName)}");
 #endif
             }
@@ -1254,6 +1328,60 @@ namespace TelloQuest
 #else
                 flightLogFileStream = null;
 #endif
+            }
+        }
+
+        // =================================================================
+        // FLIGHT LOG - ECRITURE BUFFERISEE
+        //
+        // Avant : chaque ligne partait sur le disque des qu'elle etait produite,
+        // soit ~10 fois par seconde, et sur Android chaque ecriture etait un appel
+        // JNI outputStream.write(). Dix hitches par seconde sur le main thread,
+        // pendant tout le vol, pour des donnees que personne ne lit avant
+        // l'atterrissage. C'est le meme probleme que la tempete JNI du recorder
+        // corrigee en v0.5, simplement moins visible parce que le journal de vol
+        // n'est pas active par defaut.
+        //
+        // Maintenant : les lignes s'accumulent dans un StringBuilder et ne partent
+        // qu'une fois toutes les FlightLogFlushIntervalSeconds - ou immediatement si
+        // le tampon devient gros, ou a la fermeture. En cas de coupure brutale
+        // (batterie du casque, crash) on peut perdre les dernieres secondes de
+        // journal : c'est un compromis assume, le journal est un outil d'analyse
+        // apres coup, pas une boite noire de securite.
+        // =================================================================
+        private readonly StringBuilder flightLogBuffer = new StringBuilder(8192);
+        private float flightLogFlushTimer;
+        private const float FlightLogFlushIntervalSeconds = 3f;
+        private const int FlightLogMaxBufferedChars = 16384;
+
+        /// <summary>Met une ligne en attente. N'ecrit rien sur le disque.</summary>
+        private void QueueFlightLogText(string text)
+        {
+            flightLogBuffer.Append(text);
+            if (flightLogBuffer.Length >= FlightLogMaxBufferedChars) FlushFlightLog();
+        }
+
+        /// <summary>Vide le tampon sur le disque. Appelee periodiquement depuis
+        /// Update(), a la fermeture du journal, et quand le tampon deborde.</summary>
+        private void FlushFlightLog()
+        {
+            if (flightLogBuffer.Length == 0) return;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (flightLogOutputStream == null) { flightLogBuffer.Clear(); return; }
+#else
+            if (flightLogFileStream == null) { flightLogBuffer.Clear(); return; }
+#endif
+            try
+            {
+                WriteRawFlightLogBytes(Encoding.UTF8.GetBytes(flightLogBuffer.ToString()));
+                flightLogBuffer.Clear();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TelloConnection] Flight log flush failed, disabling: {e.Message}");
+                flightLogBuffer.Clear();
+                CloseFlightLog();
             }
         }
 
@@ -1273,6 +1401,8 @@ namespace TelloQuest
 #else
             if (flightLogFileStream == null) return;
 #endif
+            // string.Join sur un tableau temporaire allouait un tableau + 19 chaines
+            // intermediaires a chaque ligne. On ecrit directement dans le tampon.
             try
             {
                 string line = string.Join(",", new[]
@@ -1297,17 +1427,26 @@ namespace TelloQuest
                     estimatedPositionCm.x.ToString("F1", CultureInfo.InvariantCulture),
                     estimatedPositionCm.y.ToString("F1", CultureInfo.InvariantCulture),
                 }) + "\n";
-                WriteRawFlightLogBytes(Encoding.UTF8.GetBytes(line));
+                QueueFlightLogText(line);
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[TelloConnection] Flight log write failed, disabling: {e.Message}");
+                Debug.LogWarning($"[TelloConnection] Flight log formatting failed, disabling: {e.Message}");
                 CloseFlightLog();
             }
         }
 
         private void CloseFlightLog()
         {
+            // Vide ce qui reste AVANT de fermer le flux - sinon les dernieres
+            // secondes de vol seraient perdues a chaque atterrissage.
+            if (flightLogBuffer.Length > 0)
+            {
+                try { WriteRawFlightLogBytes(Encoding.UTF8.GetBytes(flightLogBuffer.ToString())); }
+                catch (Exception e) { Debug.LogWarning($"[TelloConnection] Final flight log flush failed: {e.Message}"); }
+                flightLogBuffer.Clear();
+            }
+
 #if UNITY_ANDROID && !UNITY_EDITOR
             try { flightLogOutputStream?.Call("flush"); flightLogOutputStream?.Call("close"); }
             catch (Exception e) { Debug.LogWarning($"[TelloConnection] Error closing flight log stream: {e.Message}"); }

@@ -1,4 +1,6 @@
+using System;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 
 namespace TelloQuest
 {
@@ -511,6 +513,95 @@ namespace TelloQuest
         /// Returns null if no frame has been decoded yet or the required
         /// material is missing.
         /// </summary>
+        /// <summary>
+        /// Recupere les pixels bruts de l'image courante, prets a etre encodes en PNG
+        /// SUR UN AUTRE THREAD (voir TelloGamepadController.CapturePhotoToDisk).
+        ///
+        /// Pourquoi ne pas simplement rendre la Texture2D : tout ce qui touche a un
+        /// objet Texture2D (ReadPixels, Apply, EncodeToPNG) doit rester sur le main
+        /// thread. En sortant les octets ici, l'encodage PNG - la partie lente,
+        /// 50-150 ms - peut partir sur un thread de fond via
+        /// ImageConversion.EncodeArrayToPNG, qui travaille sur un tableau et pas sur
+        /// une texture.
+        ///
+        /// Cette methode gere aussi la propriete des textures, ce que l'ancienne
+        /// CaptureSnapshot() laissait a l'appelant sans le dire : dans le chemin YUV
+        /// elle CREE une Texture2D (que personne ne detruisait - une fuite par photo),
+        /// alors que dans le chemin RGBA elle renvoyait la texture du DECODEUR, qu'il
+        /// ne faut surtout pas detruire. Les deux cas sont traites ici, a l'interieur.
+        /// </summary>
+        public bool TryCaptureSnapshotPixels(out byte[] pixels, out int width, out int height, out GraphicsFormat format)
+        {
+            pixels = null; width = 0; height = 0; format = GraphicsFormat.None;
+            if (decoder == null) return false;
+
+            // Chemin RGBA : la texture appartient au decodeur, on se contente de lire.
+            if (!decoder.IsYuvNv12)
+            {
+                Texture2D source = decoder.VideoTexture;
+                if (source == null) return false;
+                try
+                {
+                    pixels = source.GetRawTextureData();
+                    width = source.width;
+                    height = source.height;
+                    format = source.graphicsFormat;
+                    return pixels != null && pixels.Length > 0;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[TelloVideoDisplay] Could not read decoder texture for snapshot: {e.Message}");
+                    return false;
+                }
+            }
+
+            if (yuvInstance == null || decoder.YPlane == null || decoder.UVPlane == null) return false;
+
+            // Dimensions REELLES (SPS), pas celles de la texture : celle-ci peut
+            // inclure le padding d'alignement MediaCodec, qui se retrouverait dans le
+            // PNG sous forme de bandes vertes.
+            width = decoder.VideoWidth > 0 ? decoder.VideoWidth : decoder.YPlane.width;
+            height = decoder.VideoHeight > 0 ? decoder.VideoHeight : decoder.YPlane.height;
+
+            // sRGB explicite : le shader sort du lineaire, donc sans ce flag le PNG
+            // serait beaucoup plus sombre que ce qu'on voit a l'ecran.
+            RenderTexture rt = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+            RenderTexture previousActive = RenderTexture.active;
+            Texture2D scratch = null;
+            try
+            {
+                Graphics.Blit(null, rt, yuvInstance);
+                RenderTexture.active = rt;
+
+                scratch = new Texture2D(width, height, TextureFormat.RGB24, false);
+                scratch.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                scratch.Apply();
+
+                pixels = scratch.GetRawTextureData();
+                format = scratch.graphicsFormat;
+                return pixels != null && pixels.Length > 0;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TelloVideoDisplay] Snapshot failed: {e.Message}");
+                return false;
+            }
+            finally
+            {
+                RenderTexture.active = previousActive;
+                RenderTexture.ReleaseTemporary(rt);
+                // La texture de travail est detruite ICI, systematiquement. C'est la
+                // fuite que l'ancienne API laissait a l'appelant, qui ne la faisait pas.
+                if (scratch != null) Destroy(scratch);
+            }
+        }
+
+        /// <summary>Ancienne API, conservee pour compatibilite. ATTENTION : dans le
+        /// chemin YUV elle renvoie une Texture2D neuve dont l'appelant devient
+        /// responsable (Destroy obligatoire), alors que dans le chemin RGBA elle
+        /// renvoie la texture du decodeur, qu'il ne faut PAS detruire. Cette asymetrie
+        /// est precisement pourquoi TryCaptureSnapshotPixels ci-dessus existe -
+        /// preferer celle-la.</summary>
         public Texture2D CaptureSnapshot()
         {
             if (decoder == null) return null;

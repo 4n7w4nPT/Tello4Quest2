@@ -113,10 +113,30 @@ namespace TelloQuest
         private TextMeshProUGUI cancelPrompt;
         private TextMeshProUGUI subtitleText;
 
-        private enum RowKind { Float, Bool }
+        private enum RowKind { Float, Bool, Choice }
 
         private class SettingsRow
         {
+            /// <summary>Identifiant stable, utilise par les presets pour retrouver une
+            /// ligne precise sans dependre de son libelle affiche. Null si la ligne
+            /// n'a pas besoin d'etre adressee.</summary>
+            public string id;
+
+            /// <summary>Renvoie false quand la ligne existe mais n'est pas utilisable
+            /// sur ce materiel (typiquement : commandes SDK 2.0 sur un Tello grand
+            /// public). La ligne reste VISIBLE et selectionnable - on peut donc lire
+            /// pourquoi elle est indisponible - mais le stick droit ne la modifie
+            /// plus. Masquer purement et simplement aurait ete pire : l'utilisateur
+            /// aurait cherche un reglage documente qui n'apparait nulle part.</summary>
+            public Func<bool> isAvailable;
+            public string lockedNote;
+
+            // Lignes a choix multiples (presets)
+            public string[] choiceLabels;
+            public int choiceIndex;
+            public Action<int> onChoiceChanged;
+            public readonly List<Image> segments = new List<Image>();
+
             public RowKind kind;
             public float min, max;
             public float floatValue;
@@ -159,6 +179,7 @@ namespace TelloQuest
             public GameObject root;
             public RectTransform contentRect;
             public readonly List<SettingsRow> rows = new List<SettingsRow>();
+            public readonly Dictionary<string, SettingsRow> byId = new Dictionary<string, SettingsRow>();
             public readonly List<Action> saveActions = new List<Action>();
             public float contentHeight;
             public int selectedRow;
@@ -171,6 +192,7 @@ namespace TelloQuest
 
         private const float RowSelectRepeatDelay = 0.22f;
         private float rowSelectCooldown;
+        private float choiceCooldown;
 
         private void Awake()
         {
@@ -178,8 +200,13 @@ namespace TelloQuest
             circleSprite = TelloUiKit.GetRoundedSprite(10000f);
             handleSprite = TelloUiKit.GetRoundedSprite(7f);
 
-            if (videoDecoder == null) videoDecoder = FindObjectOfType<TelloVideoDecoder>();
-            if (actionLogPanel == null) actionLogPanel = FindObjectOfType<TelloActionLogPanel>();
+            // FindAnyObjectByType et pas FindFirstObjectByType : ce dernier est lui
+            // aussi deprecie (il dependait de l'ordre des instance IDs). "Any" convient
+            // parfaitement ici puisqu'il n'existe qu'une seule instance de chacun dans
+            // la scene - et si un jour il y en avait plusieurs, c'est la reference
+            // assignee dans l'Inspector qui devrait trancher, pas cette recherche.
+            if (videoDecoder == null) videoDecoder = FindAnyObjectByType<TelloVideoDecoder>();
+            if (actionLogPanel == null) actionLogPanel = FindAnyObjectByType<TelloActionLogPanel>();
 
             BuildUI();
         }
@@ -197,6 +224,7 @@ namespace TelloQuest
             {
                 if (row.kind == RowKind.Float && row.getFloat != null) row.floatValue = row.getFloat();
                 else if (row.kind == RowKind.Bool && row.getBool != null) row.boolValue = row.getBool();
+                else if (row.kind == RowKind.Choice) row.choiceIndex = 0; // on rouvre toujours sur Custom
             }
 
             RefreshRows();
@@ -243,19 +271,37 @@ namespace TelloQuest
                 else if (left.y < -0.5f) { activePage.selectedRow = Mathf.Min(activePage.rows.Count - 1, activePage.selectedRow + 1); rowSelectCooldown = RowSelectRepeatDelay; }
             }
 
+            choiceCooldown -= Time.deltaTime;
+
             if (activePage.rows.Count > 0)
             {
                 SettingsRow row = activePage.rows[activePage.selectedRow];
-                if (Mathf.Abs(right.x) > 0.15f)
+                bool available = row.isAvailable == null || row.isAvailable();
+
+                if (available && Mathf.Abs(right.x) > 0.15f)
                 {
                     if (row.kind == RowKind.Float)
                     {
                         float t = Time.deltaTime / secondsForFullSweep;
                         row.floatValue = Mathf.Clamp(row.floatValue + right.x * t * (row.max - row.min), row.min, row.max);
+                        NoteManualEdit(row);
                     }
-                    else
+                    else if (row.kind == RowKind.Bool)
                     {
-                        row.boolValue = right.x > 0f;
+                        bool next = right.x > 0f;
+                        if (next != row.boolValue) NoteManualEdit(row);
+                        row.boolValue = next;
+                    }
+                    else if (row.kind == RowKind.Choice && choiceCooldown <= 0f)
+                    {
+                        // Pas de balayage continu ici : un choix est discret, on avance
+                        // d'un cran par poussee, avec la meme temporisation que le
+                        // deplacement de ligne.
+                        choiceCooldown = RowSelectRepeatDelay;
+                        int step = right.x > 0f ? 1 : -1;
+                        int count = row.choiceLabels.Length;
+                        row.choiceIndex = ((row.choiceIndex + step) % count + count) % count;
+                        row.onChoiceChanged?.Invoke(row.choiceIndex);
                     }
                 }
             }
@@ -299,7 +345,9 @@ namespace TelloQuest
             foreach (var row in activePage.rows)
             {
                 if (row.kind == RowKind.Float) row.setFloat?.Invoke(row.floatValue);
-                else row.setBool?.Invoke(row.boolValue);
+                else if (row.kind == RowKind.Bool) row.setBool?.Invoke(row.boolValue);
+                // Les lignes Choice n'ont pas de valeur propre a ecrire : elles ont
+                // deja agi sur les autres lignes au moment de la selection.
             }
             foreach (var save in activePage.saveActions) save?.Invoke();
             Close();
@@ -315,7 +363,8 @@ namespace TelloQuest
             foreach (var row in activePage.rows)
             {
                 if (row.kind == RowKind.Float) row.floatValue = row.defaultFloat;
-                else row.boolValue = row.defaultBool;
+                else if (row.kind == RowKind.Bool) row.boolValue = row.defaultBool;
+                else row.choiceIndex = 0; // retour a Custom
             }
             RefreshRows();
         }
@@ -514,6 +563,101 @@ namespace TelloQuest
         }
 
 
+
+        // =================================================================
+        // PRESETS DE QUALITE VIDEO
+        //
+        // La page video porte maintenant une dizaine de reglages d'image qui
+        // interagissent entre eux (bicubique, lissage + son seuil, accentuation,
+        // mode nuit et ses trois parametres). C'est beaucoup de surface de reglage a
+        // parcourir a la main, casque sur la tete, drone en vol. Un preset pose
+        // d'un coup un point de depart coherent, que le pilote peut ensuite affiner
+        // ligne par ligne - des qu'il touche a autre chose, le preset repasse a
+        // "Custom" pour ne pas pretendre decrire un etat qui n'est plus le sien.
+        //
+        // Ce que les presets NE touchent PAS, volontairement : balance des blancs,
+        // luminosite et contraste. Ce ne sont pas des reglages de "qualite" mais des
+        // corrections propres a un eclairage donne - les ecraser en changeant de
+        // preset detruirait un reglage que le pilote a fait pour de bonnes raisons.
+        // =================================================================
+        private static readonly string[] PresetLabels = { "Custom", "Sharp", "Balanced", "Smooth", "Low light" };
+
+        private const string PresetRowId = "video_preset";
+
+        private struct ImagePreset
+        {
+            public bool bicubic;
+            public float smoothing;
+            public float smoothingEdge;
+            public float sharpen;
+            public float nightStrength;
+            public float nightThreshold;
+            public float nightBlur;
+        }
+
+        // Index 0 (Custom) n'a pas d'entree : il ne decrit rien, il signale juste que
+        // l'etat courant ne correspond a aucun preset.
+        private static readonly ImagePreset[] Presets =
+        {
+            // Sharp - detail maximum, aucun lissage. Bon par forte lumiere, ou le
+            // bruit de capteur est faible et le blocking H.264 discret.
+            new ImagePreset { bicubic = true, smoothing = 0f,    smoothingEdge = 0.08f, sharpen = 0.60f, nightStrength = 0f,    nightThreshold = 2f, nightBlur = 0f },
+            // Balanced - le point de depart recommande. Assez de lissage pour effacer
+            // le blocking dans les aplats, assez d'accentuation pour garder du piquant.
+            new ImagePreset { bicubic = true, smoothing = 0.45f, smoothingEdge = 0.08f, sharpen = 0.35f, nightStrength = 0f,    nightThreshold = 2f, nightBlur = 0f },
+            // Smooth - priorite au confort. Utile quand la liaison est mauvaise et que
+            // les artefacts de compression fatiguent plus que le detail ne manque.
+            new ImagePreset { bicubic = true, smoothing = 0.80f, smoothingEdge = 0.15f, sharpen = 0.15f, nightStrength = 0f,    nightThreshold = 2f, nightBlur = 0f },
+            // Low light - releve les zones sombres et lisse davantage, puisque le boost
+            // de luminosite amplifie mecaniquement le bruit du capteur avec lui.
+            new ImagePreset { bicubic = true, smoothing = 0.60f, smoothingEdge = 0.12f, sharpen = 0.25f, nightStrength = 0.45f, nightThreshold = 2f, nightBlur = 0.40f },
+        };
+
+        /// <summary>Ecrit les valeurs du preset dans les valeurs EN ATTENTE des lignes
+        /// concernees. Rien n'est applique au materiau ni persiste tant que Sud n'a pas
+        /// ete presse - exactement comme "Reset to Defaults".</summary>
+        private void ApplyPreset(int index)
+        {
+            if (index <= 0 || index > Presets.Length) return; // 0 = Custom, rien a faire
+            ImagePreset preset = Presets[index - 1];
+
+            SetPendingBool("video_bicubic", preset.bicubic);
+            SetPendingFloat("video_smoothing", preset.smoothing);
+            SetPendingFloat("video_smoothing_edge", preset.smoothingEdge);
+            SetPendingFloat("video_sharpen", preset.sharpen);
+            SetPendingFloat("video_night_strength", preset.nightStrength);
+            SetPendingFloat("video_night_threshold", preset.nightThreshold);
+            SetPendingFloat("video_night_blur", preset.nightBlur);
+        }
+
+        private void SetPendingFloat(string id, float value)
+        {
+            if (activePage.byId.TryGetValue(id, out SettingsRow row))
+                row.floatValue = Mathf.Clamp(value, row.min, row.max);
+        }
+
+        private void SetPendingBool(string id, bool value)
+        {
+            if (activePage.byId.TryGetValue(id, out SettingsRow row))
+                row.boolValue = value;
+        }
+
+        /// <summary>Appelee des qu'une ligne est modifiee a la main. Si cette ligne fait
+        /// partie de celles qu'un preset pilote, le preset ne decrit plus l'etat reel :
+        /// il repasse a "Custom".</summary>
+        private void NoteManualEdit(SettingsRow row)
+        {
+            if (row.id == null || !PresetControlledIds.Contains(row.id)) return;
+            if (!activePage.byId.TryGetValue(PresetRowId, out SettingsRow presetRow)) return;
+            presetRow.choiceIndex = 0;
+        }
+
+        private static readonly HashSet<string> PresetControlledIds = new HashSet<string>
+        {
+            "video_bicubic", "video_smoothing", "video_smoothing_edge", "video_sharpen",
+            "video_night_strength", "video_night_threshold", "video_night_blur"
+        };
+
         // =================================================================
         // PAGES ET LIGNES
         // =================================================================
@@ -550,6 +694,9 @@ namespace TelloQuest
         // -----------------------------------------------------------------
         private void BuildVideoRows()
         {
+            AddSection("Quality preset");
+            AddChoiceRow(PresetRowId, "Image preset", PresetLabels, ApplyPreset);
+
             AddSection("Screen placement");
             AddFloatRow("Screen distance", 0.6f, 10f, 1.2f, "{0:F2}m",
                 () => videoScreen != null ? videoScreen.DistanceFromCamera : 1.2f,
@@ -594,27 +741,27 @@ namespace TelloQuest
             AddSection("Sharpness & noise");
             AddBoolRow("Bicubic upscale", true,
                 () => videoScreen == null || videoScreen.BicubicUpscale,
-                v => videoScreen?.SetBicubicUpscale(v));
+                v => videoScreen?.SetBicubicUpscale(v), "video_bicubic");
             AddFloatRow("Smoothing", 0f, 1f, 0f, "{0:P0}",
                 () => videoScreen != null ? videoScreen.SmoothStrength : 0f,
-                v => videoScreen?.SetSmoothStrength(v));
+                v => videoScreen?.SetSmoothStrength(v), "video_smoothing");
             AddFloatRow("Smoothing edge threshold", 0.01f, 0.5f, 0.08f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.SmoothEdgeThreshold : 0.08f,
-                v => videoScreen?.SetSmoothEdgeThreshold(v));
+                v => videoScreen?.SetSmoothEdgeThreshold(v), "video_smoothing_edge");
             AddFloatRow("Sharpening", 0f, 1.5f, 0f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.SharpenStrength : 0f,
-                v => videoScreen?.SetSharpenStrength(v));
+                v => videoScreen?.SetSharpenStrength(v), "video_sharpen");
 
             AddSection("Night mode");
             AddFloatRow("Night mode strength", 0f, 1f, 0f, "{0:P0}",
                 () => videoScreen != null ? videoScreen.NightModeStrength : 0f,
-                v => videoScreen?.SetNightModeStrength(v));
+                v => videoScreen?.SetNightModeStrength(v), "video_night_strength");
             AddFloatRow("Night mode threshold", 0.5f, 4f, 2f, "{0:F2}",
                 () => videoScreen != null ? videoScreen.NightModeThreshold : 2f,
-                v => videoScreen?.SetNightModeThreshold(v));
+                v => videoScreen?.SetNightModeThreshold(v), "video_night_threshold");
             AddFloatRow("Night mode blur", 0f, 1f, 0f, "{0:P0}",
                 () => videoScreen != null ? videoScreen.NightModeBlurStrength : 0f,
-                v => videoScreen?.SetNightModeBlurStrength(v));
+                v => videoScreen?.SetNightModeBlurStrength(v), "video_night_blur");
             if (videoScreen != null) buildingPage.saveActions.Add(videoScreen.SavePersistedSettings);
 
             AddSection("Decoding");
@@ -626,7 +773,37 @@ namespace TelloQuest
             AddFloatRow("Decoder restart timeout", 0f, 10f, 3f, "{0:F1}s",
                 () => videoDecoder != null ? videoDecoder.DecoderStallTimeoutSeconds : 3f,
                 v => { if (videoDecoder != null) videoDecoder.DecoderStallTimeoutSeconds = v; });
+
+            // Ces trois commandes n'existent QUE sur Tello EDU / Talent (SDK 2.0+).
+            // Le drone est interroge par "sdk?" a la connexion ; tant qu'il n'a pas
+            // repondu un numero de version exploitable, les lignes restent verrouillees
+            // et affichent pourquoi. Auparavant, cocher la case sur un Tello grand
+            // public envoyait trois commandes qui repondaient "error" et allumaient la
+            // pastille "Last cmd" en rouge, sans que rien n'explique la cause.
+            AddSection("Stream quality (Tello EDU only)");
+            AddBoolRow("Request higher bitrate", false,
+                () => tello != null && tello.SendStreamQualityCommands,
+                v => { if (tello != null) tello.SendStreamQualityCommands = v; });
+            MarkLastRowConditional(Sdk20Available, Sdk20LockedNote);
+
+            AddFloatRow("Video bitrate", 0f, 5f, 5f, "{0:F0}Mb",
+                () => tello != null ? tello.VideoBitrateMbps : 5f,
+                v => { if (tello != null) tello.VideoBitrateMbps = v; });
+            MarkLastRowConditional(Sdk20Available, Sdk20LockedNote);
+
+            AddBoolRow("Request 720p / high FPS", false,
+                () => tello != null && tello.RequestHighResolutionAndFps,
+                v => { if (tello != null) tello.RequestHighResolutionAndFps = v; });
+            MarkLastRowConditional(Sdk20Available, Sdk20LockedNote);
         }
+
+        private bool Sdk20Available() => tello != null && tello.SupportsSdk20Commands;
+
+        /// <summary>Distingue "on sait que ce drone ne sait pas faire" de "on n'a pas
+        /// encore la reponse" - deux situations differentes qui meritent deux messages
+        /// differents.</summary>
+        private string Sdk20LockedNote =>
+            tello == null || tello.SdkVersionUnknown ? "SDK 1.3" : $"SDK {tello.SdkVersion}";
 
         // -----------------------------------------------------------------
         // PAGE GENERALE - tout le reste, classe par theme
@@ -810,32 +987,63 @@ namespace TelloQuest
             cursorY -= SectionHeaderHeight;
         }
 
-        private void AddFloatRow(string label, float min, float max, float defaultValue, string format, Func<float> getter, Action<float> setter)
+        private void AddChoiceRow(string id, string label, string[] options, Action<int> onChanged)
+        {
+            SettingsRow row = BuildRowVisual(label, RowKind.Choice, options.Length);
+            row.kind = RowKind.Choice;
+            row.id = id;
+            row.choiceLabels = options;
+            row.choiceIndex = 0;
+            row.onChoiceChanged = onChanged;
+            Register(row);
+            cursorY -= RowHeight;
+        }
+
+        /// <summary>Marque la derniere ligne ajoutee comme indisponible sur ce materiel.
+        /// Elle reste visible et selectionnable, mais ne se regle plus et affiche la
+        /// note a la place de sa valeur.</summary>
+        private void MarkLastRowConditional(Func<bool> isAvailable, string lockedNote)
+        {
+            if (buildingPage.rows.Count == 0) return;
+            SettingsRow row = buildingPage.rows[buildingPage.rows.Count - 1];
+            row.isAvailable = isAvailable;
+            row.lockedNote = lockedNote;
+        }
+
+        private void Register(SettingsRow row)
+        {
+            buildingPage.rows.Add(row);
+            if (row.id != null) buildingPage.byId[row.id] = row;
+        }
+
+        private void AddFloatRow(string label, float min, float max, float defaultValue, string format, Func<float> getter, Action<float> setter, string id = null)
         {
             SettingsRow row = BuildRowVisual(label, RowKind.Float);
             row.kind = RowKind.Float;
+            row.id = id;
             row.min = min;
             row.max = max;
             row.defaultFloat = defaultValue;
             row.format = format;
             row.getFloat = getter;
             row.setFloat = setter;
-            buildingPage.rows.Add(row);
+            Register(row);
             cursorY -= RowHeight;
         }
 
-        private void AddBoolRow(string label, bool defaultValue, Func<bool> getter, Action<bool> setter)
+        private void AddBoolRow(string label, bool defaultValue, Func<bool> getter, Action<bool> setter, string id = null)
         {
             SettingsRow row = BuildRowVisual(label, RowKind.Bool);
             row.kind = RowKind.Bool;
+            row.id = id;
             row.defaultBool = defaultValue;
             row.getBool = getter;
             row.setBool = setter;
-            buildingPage.rows.Add(row);
+            Register(row);
             cursorY -= RowHeight;
         }
 
-        private SettingsRow BuildRowVisual(string label, RowKind kind)
+        private SettingsRow BuildRowVisual(string label, RowKind kind, int segmentCount = 0)
         {
             var rowGO = new GameObject($"Row_{label}", typeof(RectTransform));
             rowGO.transform.SetParent(buildingPage.contentRect, false);
@@ -891,7 +1099,8 @@ namespace TelloQuest
             };
 
             if (kind == RowKind.Float) BuildSlider(rowRect, row);
-            else BuildSwitch(rowRect, row);
+            else if (kind == RowKind.Bool) BuildSwitch(rowRect, row);
+            else BuildSegments(rowRect, row, segmentCount);
 
             return row;
         }
@@ -971,6 +1180,38 @@ namespace TelloQuest
             row.handleEdge = haloRect;
         }
 
+        /// <summary>Selecteur a segments : une pastille par option, la courante remplie.
+        /// Visuellement parent du curseur (meme rail, meme largeur), mais discret : un
+        /// choix parmi 5 ne se lit pas comme une valeur continue.</summary>
+        private void BuildSegments(RectTransform rowRect, SettingsRow row, int count)
+        {
+            if (count <= 0) return;
+
+            var groupGO = new GameObject("Segments", typeof(RectTransform));
+            groupGO.transform.SetParent(rowRect, false);
+            RectTransform groupRect = groupGO.GetComponent<RectTransform>();
+            groupRect.sizeDelta = new Vector2(RailWidth, 10f);
+            groupRect.anchoredPosition = new Vector2(SliderCentreX, ControlY);
+
+            const float gap = 5f;
+            float segWidth = (RailWidth - gap * (count - 1)) / count;
+            float startX = -RailWidth * 0.5f + segWidth * 0.5f;
+
+            for (int i = 0; i < count; i++)
+            {
+                var segGO = new GameObject($"Seg{i}", typeof(RectTransform), typeof(Image));
+                segGO.transform.SetParent(groupRect, false);
+                RectTransform segRect = segGO.GetComponent<RectTransform>();
+                segRect.sizeDelta = new Vector2(segWidth, 6f);
+                segRect.anchoredPosition = new Vector2(startX + i * (segWidth + gap), 0f);
+                Image segImage = segGO.GetComponent<Image>();
+                segImage.sprite = circleSprite;
+                segImage.type = Image.Type.Simple;
+                segImage.color = TrackBg;
+                row.segments.Add(segImage);
+            }
+        }
+
         /// <summary>Interrupteur a bascule : piste en pilule + bouton qui glisse.</summary>
         private void BuildSwitch(RectTransform rowRect, SettingsRow row)
         {
@@ -1002,6 +1243,19 @@ namespace TelloQuest
             row.switchKnobImage.color = InkDim;
         }
 
+        private static readonly Color LockedInk = HexColor("#565C62");
+
+        /// <summary>Estompe le controle d'une ligne indisponible sans le supprimer -
+        /// la ligne garde sa forme, on voit juste qu'elle est hors service.</summary>
+        private static void DimControl(SettingsRow row)
+        {
+            if (row.fillImage != null) row.fillImage.color = TrackBg;
+            if (row.handleImage != null) row.handleImage.color = LockedInk;
+            if (row.switchTrack != null) row.switchTrack.color = SwitchOffTrack;
+            if (row.switchKnobImage != null) row.switchKnobImage.color = LockedInk;
+            for (int i = 0; i < row.segments.Count; i++) row.segments[i].color = TrackBg;
+        }
+
         // =================================================================
         // RAFRAICHISSEMENT
         // =================================================================
@@ -1012,11 +1266,32 @@ namespace TelloQuest
             {
                 SettingsRow row = rows[i];
                 bool selected = i == activePage.selectedRow;
+                bool available = row.isAvailable == null || row.isAvailable();
 
                 row.selectionBg.color = selected ? RowSelectedBg : RowClearBg;
-                row.labelText.color = selected ? Ink : InkDim;
-                row.labelText.fontStyle = selected ? FontStyles.Bold : FontStyles.Normal;
-                row.valueText.color = selected ? Amber : Ink;
+                row.labelText.color = !available ? LockedInk : (selected ? Ink : InkDim);
+                row.labelText.fontStyle = selected && available ? FontStyles.Bold : FontStyles.Normal;
+                row.valueText.color = !available ? LockedInk : (selected ? Amber : Ink);
+
+                // Ligne indisponible : on affiche la raison a la place de la valeur, et
+                // le controle est estompe. Le pilote comprend donc pourquoi il ne peut
+                // rien regler, au lieu de pousser le stick sans effet.
+                if (!available)
+                {
+                    row.valueText.text = row.lockedNote ?? "N/A";
+                    DimControl(row);
+                    continue;
+                }
+
+                if (row.kind == RowKind.Choice)
+                {
+                    for (int seg = 0; seg < row.segments.Count; seg++)
+                        row.segments[seg].color = seg == row.choiceIndex
+                            ? (selected ? Amber : AmberDeep)
+                            : TrackBg;
+                    row.valueText.text = row.choiceLabels[row.choiceIndex];
+                    continue;
+                }
 
                 if (row.kind == RowKind.Float)
                 {

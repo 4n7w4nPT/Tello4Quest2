@@ -82,6 +82,9 @@ namespace TelloQuest
         [Header("=== SETTINGS SCREEN ===")]
         [SerializeField] private GameObject settingsScreenObject;
         [SerializeField] private TelloSettingsScreen settingsScreen;
+        [Tooltip("Ecran de legende des commandes (lecture seule), ouvert par la direction GAUCHE de la croix directionnelle.")]
+        [SerializeField] private GameObject controlsScreenObject;
+        [SerializeField] private TelloControlsScreen controlsScreen;
 
         [Header("=== FIXED PLACEMENT (same formula as TelloVideoDisplay) ===")]
         [SerializeField] private float distanceFromCamera = 1.2f;
@@ -108,11 +111,17 @@ namespace TelloQuest
         [SerializeField] private string iconGlyphXboxEast = "c";
         [SerializeField] private string iconGlyphXboxWest = "a";
 
-        private const float CanvasPixelWidth = 1240f;
+        // Le canevas s'est elargi pour accueillir une SECONDE croix, celle de la
+        // croix directionnelle, a gauche de la checklist - en miroir de la croix des
+        // boutons a droite. La disposition se lit donc comme la manette elle-meme :
+        // D-pad a gauche, boutons a droite, et l'etat de l'appareil au milieu.
+        private const float CanvasPixelWidth = 1700f;
         private const float CanvasPixelHeight = 620f;
-        private const float LeftCenterX = -310f;
-        private const float RightCenterX = 310f;
+        private const float DpadCenterX = -660f;
+        private const float LeftCenterX = -110f;
+        private const float RightCenterX = 560f;
         private const float CrossSize = 400f;
+        private const float DpadCrossSize = 360f;
 
         private static readonly Color PanelBg = HexColor("#15181B");
         private static readonly Color PanelEdge = HexColor("#262B30");
@@ -277,6 +286,7 @@ namespace TelloQuest
             centerDividerRect.anchoredPosition = Vector2.zero;
             centerDividerGO.GetComponent<Image>().color = PanelEdge;
 
+            BuildDpadLegend(canvasGO.transform);
             BuildLeftChecklist(canvasGO.transform);
             BuildRightLegend(canvasGO.transform);
         }
@@ -374,6 +384,69 @@ namespace TelloQuest
             statusText.alignment = TextAlignmentOptions.Center;
             statusText.textWrappingMode = TextWrappingModes.NoWrap;
             statusText.overflowMode = TextOverflowModes.Ellipsis;
+        }
+
+        /// <summary>
+        /// Croix directionnelle, a gauche. UNE SEULE direction est active pour
+        /// l'instant : Gauche ouvre la legende des commandes.
+        ///
+        /// Les trois autres restent volontairement VIDES et grisees, marquees d'un
+        /// tiret. C'est un choix, pas un oubli : jusqu'a la v0.5 le bouton Ouest de la
+        /// croix des boutons affichait "Controller" alors qu'aucune action n'y etait
+        /// liee - un pilote pouvait appuyer et se demander pourquoi rien ne se
+        /// passait. Une case explicitement vide est honnete ; une case qui promet une
+        /// action inexistante ne l'est pas.
+        /// </summary>
+        private void BuildDpadLegend(Transform parent)
+        {
+            float half = DpadCrossSize / 2f;
+            float diagLength = DpadCrossSize * 1.41421356f;
+
+            BuildDiagonalLine(parent, DpadCenterX, 0f, diagLength, 45f);
+            BuildDiagonalLine(parent, DpadCenterX, 0f, diagLength, -45f);
+
+            BuildDpadItem(parent, "Controls", "LEFT", DpadCenterX - half * 0.55f, 0f, true);
+            BuildDpadItem(parent, "-", "UP", DpadCenterX, half * 0.55f, false);
+            BuildDpadItem(parent, "-", "RIGHT", DpadCenterX + half * 0.55f, 0f, false);
+            BuildDpadItem(parent, "-", "DOWN", DpadCenterX, -half * 0.55f, false);
+        }
+
+        private void BuildDpadItem(Transform parent, string action, string direction, float x, float y, bool active)
+        {
+            var itemGO = new GameObject($"Dpad_{direction}", typeof(RectTransform));
+            itemGO.transform.SetParent(parent, false);
+            RectTransform itemRect = itemGO.GetComponent<RectTransform>();
+            itemRect.sizeDelta = new Vector2(150f, 76f);
+            itemRect.anchoredPosition = new Vector2(x, y);
+
+            var actionGO = new GameObject("Action", typeof(RectTransform));
+            actionGO.transform.SetParent(itemGO.transform, false);
+            RectTransform actionRect = actionGO.GetComponent<RectTransform>();
+            actionRect.sizeDelta = new Vector2(150f, 26f);
+            actionRect.anchoredPosition = new Vector2(0f, 18f);
+            var actionText = actionGO.AddComponent<TextMeshProUGUI>();
+            ApplyFont(actionText, bodyFont);
+            actionText.fontSize = active ? 17f : 15f;
+            actionText.fontStyle = active ? FontStyles.Bold : FontStyles.Normal;
+            actionText.color = active ? Ink : InkDim;
+            actionText.alignment = TextAlignmentOptions.Center;
+            actionText.textWrappingMode = TextWrappingModes.NoWrap;
+            actionText.overflowMode = TextOverflowModes.Ellipsis;
+            actionText.text = action;
+
+            var dirGO = new GameObject("Direction", typeof(RectTransform));
+            dirGO.transform.SetParent(itemGO.transform, false);
+            RectTransform dirRect = dirGO.GetComponent<RectTransform>();
+            dirRect.sizeDelta = new Vector2(150f, 20f);
+            dirRect.anchoredPosition = new Vector2(0f, -10f);
+            var dirText = dirGO.AddComponent<TextMeshProUGUI>();
+            ApplyFont(dirText, monoFont);
+            dirText.fontSize = 11f;
+            dirText.color = active ? Amber : PanelEdge;
+            dirText.alignment = TextAlignmentOptions.Center;
+            dirText.characterSpacing = 4f;
+            dirText.textWrappingMode = TextWrappingModes.NoWrap;
+            dirText.text = "D-PAD " + direction;
         }
 
         private void BuildRightLegend(Transform parent)
@@ -545,6 +618,7 @@ namespace TelloQuest
                     else if (pad.buttonEast.wasPressedThisFrame) { QuitApp(); lastMenuActionTime = Time.time; }
                     else if (pad.buttonNorth.wasPressedThisFrame) { EnterSettings(TelloSettingsScreen.SettingsPage.Video); lastMenuActionTime = Time.time; }
                     else if (pad.buttonWest.wasPressedThisFrame) { EnterSettings(TelloSettingsScreen.SettingsPage.General); lastMenuActionTime = Time.time; }
+                    else if (pad.dpad.left.wasPressedThisFrame) { EnterControls(); lastMenuActionTime = Time.time; }
                 }
             }
             else if (state == AppState.Piloting)
@@ -764,10 +838,28 @@ namespace TelloQuest
             else Debug.LogWarning("[TelloInitGate] Settings Screen (component) not assigned - Settings screen will never appear.");
         }
 
+        /// <summary>Ouvre la legende des commandes (lecture seule) - direction GAUCHE
+        /// de la croix directionnelle.</summary>
+        private void EnterControls()
+        {
+            state = AppState.Settings; // meme etat : ecran plein qui rend la main au menu
+            canvasGO.SetActive(false);
+
+            if (controlsScreenObject != null) controlsScreenObject.SetActive(true);
+            else Debug.LogWarning("[TelloInitGate] Controls Screen Object not assigned - the controls legend will never appear.");
+
+            if (controlsScreen != null) controlsScreen.RevealAt(transform.position, transform.rotation);
+            else Debug.LogWarning("[TelloInitGate] Controls Screen (component) not assigned - the controls legend will never appear.");
+        }
+
+        /// <summary>Retour au menu depuis N'IMPORTE QUEL ecran plein (parametres ou
+        /// legende des commandes). Les deux ecrans appellent cette meme methode, d'ou
+        /// le fait qu'elle desactive les deux sans se demander lequel etait ouvert.</summary>
         public void ExitSettings()
         {
             state = AppState.Menu;
             if (settingsScreenObject != null) settingsScreenObject.SetActive(false);
+            if (controlsScreenObject != null) controlsScreenObject.SetActive(false);
             canvasGO.SetActive(true);
         }
 

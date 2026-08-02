@@ -256,6 +256,35 @@ namespace TelloQuest
         /// <param name="halfPanelWidth">Demi-largeur du panneau, utilisee pour le repli non ancre.</param>
         /// <param name="pinInnerEdge">false = ancien comportement (rotation autour du centre).</param>
         /// <param name="depthOffset">Decalage supplementaire en Z local, applique apres l'ancrage.</param>
+        // =================================================================
+        // DIAGNOSTICS - INTERRUPTEUR GLOBAL
+        //
+        // Quatre composants avaient chacun leur propre case "verbose diagnostics"
+        // dans l'Inspector, pour ce qui est conceptuellement une seule decision.
+        // Pire, il fallait penser a les cocher ET les decocher ensemble : en oublier
+        // une laissait un Debug.Log par seconde partir vers logcat en vol.
+        //
+        // Chaque composant garde sa case locale (pratique pour n'activer qu'une
+        // source), mais TOUTES sont maintenant conditionnees par ce commutateur.
+        // Le mettre a false coupe tout d'un coup, quoi qu'il y ait dans les cases.
+        // =================================================================
+        private static bool diagnosticsMasterEnabled =
+            PlayerPrefs.GetInt("TelloQuest_Diagnostics_Master", 0) == 1;
+
+        /// <summary>Quand false, aucun composant ne logge ses compteurs, quelles que
+        /// soient ses propres cases. False par defaut : sur Quest, Debug.Log part vers
+        /// logcat et coute du temps main-thread.</summary>
+        public static bool DiagnosticsEnabled
+        {
+            get => diagnosticsMasterEnabled;
+            set
+            {
+                diagnosticsMasterEnabled = value;
+                PlayerPrefs.SetInt("TelloQuest_Diagnostics_Master", value ? 1 : 0);
+                PlayerPrefs.Save();
+            }
+        }
+
         public static Vector3 SolvePinnedPanelPosition(
             Quaternion rotation,
             Vector3 innerEdgeLocalOffset,

@@ -49,6 +49,8 @@ namespace TelloQuest
         [Header("=== RECOVERY ===")]
         [Tooltip("Si des access units sont poussees mais qu'aucune frame ne sort pendant ce delai, le decodeur est recree. 0 = desactive.")]
         [SerializeField] private float decoderStallTimeoutSeconds = 3f;
+        [Tooltip("Temps maximum passe a vider la file de sortie du decodeur par frame. La premiere frame est toujours consommee, meme si le budget est deja depasse - sinon un budget trop bas bloquerait la video entierement.")]
+        [SerializeField] private float maxDrainMilliseconds = 2f;
 
         [Header("=== DIAGNOSTICS ===")]
         [Tooltip("Log une ligne de compteurs par seconde. A laisser decoche en vol : Debug.Log vers logcat coute cher sur Quest.")]
@@ -268,10 +270,20 @@ namespace TelloQuest
             // rafales) : ne compter qu'une fois par Update sous-estimait fortement la
             // cadence reelle - c'est ce qui faisait afficher ~12 fps a
             // TelloStatusPanel alors que le flux tournait bien a ~30.
+            // Budget de TEMPS en plus du plafond de frames. Le plafond seul ne dit
+            // rien du cout reel : si MediaCodec rend une longue rafale, on paie 16
+            // GetNextFrame dans la meme frame et ca se voit. Avec le budget, on
+            // s'arrete des qu'on a consomme sa part et le reste sera pris au tour
+            // suivant - la file ne grossit pas pour autant puisqu'on continue de
+            // drainer a chaque frame.
+            float drainDeadline = Time.realtimeSinceStartup + maxDrainMilliseconds * 0.001f;
+
             int framesThisUpdate = 0;
             int guard = 0;
             while (guard++ < 16)
             {
+                if (guard > 1 && Time.realtimeSinceStartup > drainDeadline) break;
+
                 int? frameNumber = decoder.GetNextFrame(ref planes, ref pixelFormats);
                 if (!frameNumber.HasValue) break;
                 diagnosticFrameNumberHits++;
@@ -650,7 +662,7 @@ namespace TelloQuest
         // =================================================================
         private void RunDiagnosticLog()
         {
-            if (!verboseDiagnostics) return;
+            if (!verboseDiagnostics || !TelloUiKit.DiagnosticsEnabled) return;
             diagnosticLogTimer += Time.deltaTime;
             if (diagnosticLogTimer < 1f) return;
             diagnosticLogTimer = 0f;

@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Concurrent;
+using System.Threading;
 using System.Collections;
 using System.IO;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Events;
 using UnityEngine.InputSystem;
 
@@ -207,14 +210,26 @@ namespace TelloQuest
         [SerializeField] private bool verboseDiagnostics = false;
         private float diagnosticLogTimer;
 
+        /// <summary>Une photo dont l'encodage se terminait au moment ou l'on quitte
+        /// serait perdue : on laisse un court instant au thread de fond, puis on ecrit
+        /// ce qui est pret.</summary>
+        private void OnDestroy()
+        {
+            for (int i = 0; i < 20 && Interlocked.CompareExchange(ref photosEncoding, 0, 0) > 0; i++)
+                Thread.Sleep(10);
+            DrainEncodedPhotos();
+        }
+
         private void Update()
         {
+            DrainEncodedPhotos();
+
             Gamepad pad = TelloUiKit.GetActiveGamepad();
 
             // Ce bloc loggait une ligne par SECONDE en permanence, avec deux acces
             // natifs a displayName et une interpolation de chaine. Debug.Log part vers
             // logcat sur Quest et coute cher. Passe derriere un flag, decoche par defaut.
-            if (verboseDiagnostics)
+            if (verboseDiagnostics && TelloUiKit.DiagnosticsEnabled)
             {
                 diagnosticLogTimer += Time.deltaTime;
                 if (diagnosticLogTimer >= 1f)
@@ -256,21 +271,34 @@ namespace TelloQuest
 
             // Everything below only applies in piloting mode. On the menu screen,
             // South/West/East/North are read by TelloInitGate instead (enter piloting
-            // / quit app / open gallery) - without this gate, pressing X to enter
-            // piloting would also fire ToggleTakeoffLand() the same frame.
+            // / flight settings / quit / video settings) - without this gate, pressing
+            // South to enter piloting would also fire RequestTakeoff() the same frame.
             if (appStateGate == null || !appStateGate.IsPiloting) return;
 
             HandleSticks(pad);
 
-            // South (Cross on PS4 / A on Xbox): single button, toggles takeoff/land
-            // based on current state.
-            if (pad.buttonSouth.wasPressedThisFrame) ToggleTakeoffLand();
+            // South = DECOLLER, East = ATTERRIR. Deux boutons distincts, un seul
+            // sens chacun.
+            //
+            // C'etait auparavant un unique bouton bascule sur South : appuyer avec
+            // une idee fausse de l'etat du drone faisait exactement l'inverse de ce
+            // qu'on voulait - et l'etat peut vraiment etre faux (perte d'ack UDP,
+            // atterrissage automatique batterie critique declenche tout seul). Un
+            // bouton, une action, quel que soit l'etat : il n'y a plus rien a
+            // deviner avant d'appuyer.
+            //
+            // Chaque bouton ignore silencieusement l'appui si le drone est deja dans
+            // l'etat demande. C'est volontaire : sans ce garde-fou on aurait juste
+            // deplace le probleme, en envoyant des "takeoff" repetes a un drone deja
+            // en vol - que le Tello refuse par une reponse "error", ce qui allumerait
+            // en rouge la pastille "Last cmd" du bandeau superieur pour un appui qui
+            // n'a en realite rien de fautif.
+            if (pad.buttonSouth.wasPressedThisFrame) RequestTakeoff();
+            if (pad.buttonEast.wasPressedThisFrame) RequestLand();
 
-            // West (Square on PS4 / X on Xbox) and East (Circle on PS4 / B on
-            // Xbox): both save a snapshot of the current frame - East used to
-            // toggle a "Menu mode" that no longer exists, so it was repurposed
-            // here instead of being left unused.
-            if (pad.buttonWest.wasPressedThisFrame || pad.buttonEast.wasPressedThisFrame)
+            // West (Square on PS4 / X on Xbox): photo. East partageait cette fonction
+            // avant le decouplage ci-dessus ; c'est desormais le seul bouton photo.
+            if (pad.buttonWest.wasPressedThisFrame)
             {
                 onTakePhoto?.Invoke();
                 CapturePhotoToDisk();
@@ -304,10 +332,19 @@ namespace TelloQuest
             if (pad.rightTrigger.wasPressedThisFrame) SetSensitivityLevel(sensitivityLevel - 1);
         }
 
-        private void ToggleTakeoffLand()
+        /// <summary>South. Sans effet si le drone vole deja - voir le commentaire du
+        /// mapping sur pourquoi on ignore plutot que d'envoyer la commande quand meme.</summary>
+        private void RequestTakeoff()
         {
-            if (tello.IsFlying) tello.Land();
-            else tello.Takeoff();
+            if (tello == null || tello.IsFlying) return;
+            tello.Takeoff();
+        }
+
+        /// <summary>East. Sans effet si le drone est deja pose.</summary>
+        private void RequestLand()
+        {
+            if (tello == null || !tello.IsFlying) return;
+            tello.Land();
         }
 
         private void HandleSticks(Gamepad pad)
@@ -442,10 +479,29 @@ namespace TelloQuest
         /// inspector. If none is assigned, or no frame has been decoded yet, this
         /// only logs a one-time warning (onTakePhoto still fires either way).
         /// </summary>
+        // =================================================================
+        // PHOTO - ENCODAGE PNG HORS MAIN THREAD
+        //
+        // Avant : lecture des pixels PUIS EncodeToPNG() PUIS ecriture MediaStore,
+        // le tout sur le main thread. L'encodage seul prend 50 a 150 ms, pendant
+        // lesquelles le main thread ne vide plus la file UDP - donc le buffer de
+        // reception deborde et la VIDEO EN DIRECT decroche au moment precis ou l'on
+        // prend une photo. Exactement le meme mecanisme que la tempete JNI du
+        // recorder corrigee en v0.5.
+        //
+        // Maintenant : seules la lecture des pixels (obligatoirement main thread) et
+        // l'ecriture MediaStore (JNI, plus sur sur le main thread) y restent.
+        // L'encodage part sur le pool de threads via ImageConversion.EncodeArrayToPNG,
+        // qui travaille sur un tableau d'octets et non sur un objet Texture2D - c'est
+        // ce qui le rend utilisable hors du main thread.
+        // =================================================================
+        private readonly ConcurrentQueue<(byte[] png, string fileName)> encodedPhotos = new ConcurrentQueue<(byte[], string)>();
+        private int photosEncoding;
+
         private void CapturePhotoToDisk()
         {
-            Texture2D frame = videoDisplay != null ? videoDisplay.CaptureSnapshot() : null;
-            if (frame == null)
+            if (videoDisplay == null ||
+                !videoDisplay.TryCaptureSnapshotPixels(out byte[] pixels, out int width, out int height, out GraphicsFormat format))
             {
                 if (!photoCaptureWarningLogged)
                 {
@@ -455,15 +511,39 @@ namespace TelloQuest
                 return;
             }
 
-            try
+            string fileName = $"photo_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+            Interlocked.Increment(ref photosEncoding);
+
+            // Les dimensions et le format sont captures ici : rien de ce qui est passe
+            // au thread de fond ne touche a un objet Unity.
+            System.Threading.Tasks.Task.Run(() =>
             {
-                byte[] png = frame.EncodeToPNG();
-                string fileName = $"photo_{DateTime.Now:yyyyMMdd_HHmmss}.png";
-                SavePngToSharedStorage(png, fileName);
-            }
-            catch (Exception e)
+                try
+                {
+                    byte[] png = ImageConversion.EncodeArrayToPNG(pixels, format, (uint)width, (uint)height);
+                    if (png != null && png.Length > 0) encodedPhotos.Enqueue((png, fileName));
+                    else Debug.LogWarning("[TelloGamepadController] PNG encoding produced no data.");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[TelloGamepadController] Photo encoding failed: {e.Message}");
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref photosEncoding);
+                }
+            });
+        }
+
+        /// <summary>Ecrit sur le disque les photos dont l'encodage est termine. Appelee
+        /// depuis Update() : l'ecriture MediaStore passe par JNI, qu'on garde sur le
+        /// main thread pour ne pas avoir a gerer l'attachement du thread a la JVM.</summary>
+        private void DrainEncodedPhotos()
+        {
+            while (encodedPhotos.TryDequeue(out var item))
             {
-                Debug.LogWarning($"[TelloGamepadController] Photo capture failed: {e.Message}");
+                try { SavePngToSharedStorage(item.png, item.fileName); }
+                catch (Exception e) { Debug.LogWarning($"[TelloGamepadController] Photo save failed: {e.Message}"); }
             }
         }
 
