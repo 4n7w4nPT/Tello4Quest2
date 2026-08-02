@@ -4,7 +4,7 @@ Fly a **DJI/Ryze Tello** (consumer model, SDK 1.3) from inside a **Meta Quest 2*
 
 This repo contains every Unity script, the YUV→RGB shader, and the two materials it needs.
 
-**v0.6 — main-thread hygiene + the D-pad cross.** Removed three stalls that were stealing time from the video pipeline: an unbuffered flight log writing ten times a second, PNG encoding blocking the main thread (a photo used to drop UDP packets and visibly degrade the live feed), and an unbounded decoder drain. Added a D-pad cross on the menu opening a read-only Controls legend, driven by a single shared mapping table.
+**v0.6 — main-thread hygiene + the D-pad cross.** The flight log now buffers, PNG encoding runs off the main thread, and the decoder drain is time-budgeted — so taking a photo or logging a flight no longer costs UDP packets. The menu gained a D-pad cross opening a read-only Controls legend, driven by a single shared mapping table.
 
 <details>
 <summary>Earlier versions</summary>
@@ -30,19 +30,15 @@ This repo contains every Unity script, the YUV→RGB shader, and the two materia
 
 ## Video pipeline
 
-The heart of v0.5, and the part most worth understanding if the image ever looks wrong.
+How a frame gets from the drone to your eyes.
 
-**Reception.** Raw H.264 over UDP, no RTP, no container. Frame boundaries come from packet size: every datagram in an access unit is 1460 bytes except the last. A **4 MB receive buffer** (the OS default overflows on any main-thread hitch past ~30 ms), and units with a bad start code are dropped rather than decoded.
+**Reception.** Raw H.264 over UDP — no RTP, no container. Frame boundaries come from packet size: every datagram in an access unit is 1460 bytes except the last. A 4 MB receive buffer absorbs main-thread hitches (the OS default overflows past ~30 ms), and units with a bad start code are dropped rather than decoded.
 
-**Decoding.** PopH264 drives MediaCodec. Waits for an SPS **then an IDR** before feeding, drains the full output queue every frame (MediaCodec delivers in bursts — one at a time made latency climb all flight), and a watchdog recreates the decoder if units arrive with nothing coming out. The SPS is parsed live for resolution, crop, and colour signalling.
+**Decoding.** PopH264 drives MediaCodec. It waits for an SPS then an IDR before feeding, drains the full output queue every frame under a ~2 ms budget (MediaCodec delivers in bursts), and a watchdog recreates the decoder if units arrive with nothing coming out. The SPS is parsed live for resolution, crop rectangle and colour signalling.
 
-**Colour** — the two bugs that made it look wrong:
-- **Chroma range**: luma was range-expanded, chroma wasn't, and full-range BT.601 coefficients were applied anyway. Mixing conventions undersaturated everything by 255/224 ≈ 12%.
-- **Gamma**: YUV conversion outputs gamma-encoded RGB. Returned as-is in a **Linear** project, the hardware sRGB-encodes it twice — lifted blacks, milky contrast. The manual brightness/contrast sliders were, in hindsight, compensating for this.
+**Colour.** NV12 → RGB in the shader, with limited-range expansion on **both** luma and chroma, BT.601 or BT.709 coefficients, and half-texel chroma siting for 4:2:0. Output is converted to linear, since the project runs in Linear colour space. The Tello's stream carries no VUI, so limited-range BT.601 is the default assumption; a BT.709 switch lets you compare on foliage and skin tones.
 
-Chroma siting is corrected too (in 4:2:0 a chroma texel sits half a luma texel off, visible as fringing on vertical edges). Note the stream carries no VUI, so limited-range BT.601 is an assumption; a BT.709 switch exists for comparison.
-
-**Presentation.** Catmull-Rom bicubic, then **edge-preserving smoothing** weighting each neighbour by luma proximity — flat compression noise smooths, edges stay. Denoise first, sharpen second. The shader also has the **stereo instancing** it never had: without it, Single Pass Instanced renders the left eye into both.
+**Presentation.** Catmull-Rom bicubic upscaling, then edge-preserving smoothing that weights each neighbour by luma proximity — flat compression noise smooths away, edges stay sharp — then sharpening. Shader keywords strip any effect left at zero, and stereo instancing keeps both eyes correct under Single Pass Instanced.
 
 ## Controls
 
@@ -156,7 +152,7 @@ Everything marked **starts inactive** must actually be unchecked in the Hierarch
 | Color Space | Player | **Linear** | The shader's gamma handling assumes it. On Gamma, remove the `SRGBToLinear` call. |
 | Render Mode | XR Plug-in Management > OpenXR (Android) | **Single Pass Instanced** | The shader supports it properly; Multi-pass roughly doubles GPU cost. |
 | Render Scale | URP Asset | **~1.1** | 1.6 on a Quest 2 is 2.56× the pixels. A stable 1.1 looks sharper than an unstable 1.6. |
-| Cast Shadows | URP Asset | **off** | Nothing casts shadows; it was a wasted pass. |
+| Cast Shadows | URP Asset | **off** | Nothing in the scene casts shadows. |
 | Sharpen Type | OVRManager | **Quality** | Compositor-side sharpening at native panel resolution — better than any pre-resample sharpen, and free. |
 
 ### ⚠️ Tracking Origin — can stop the app launching entirely
@@ -170,7 +166,7 @@ Build Profiles → **Meta Quest** active. ASTC, LZ4, IL2CPP, Min API 32, Target 
 - **Gamepad not detected if it pairs after launch** — the OS-level Bluetooth connection succeeds but the controller sometimes never appears in Unity's device list at all. Likely needs a native Android bridge. Workaround: turn the gamepad on *before* launching.
 - **Macroblock artefacts from packet loss** can be reduced but not eliminated — the Tello's WiFi is 2.4 GHz only, and no shader reconstructs data that never arrived.
 - **`setbitrate` / `setresolution` / `setfps` are SDK 2.0 only** — detected automatically from the `sdk?` reply, and those rows lock themselves on a consumer Tello. On an EDU/Talent they're the biggest quality win available, being the only one acting at the source.
-- **WiFi auto-connect is built but not wired** — it proved unreliable, and its old button now opens Flight settings.
+- **WiFi auto-connect is built but not wired to any input** — unreliable in testing; connect to the Tello's hotspot from the headset's WiFi settings.
 - **In-headset gallery doesn't work** — two approaches tried, both fail on Quest's OS. Files app, MQDH and USB all work fine.
 - **BT.601 vs BT.709 is a judgement call** — the SPS carries no VUI, so nothing declares which matrix was used. A switch lets you compare on foliage and skin tones.
 - Wind-drift detection is indirect (commanded input vs. actual velocity) — thresholds may need tuning against real flights.
